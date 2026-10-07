@@ -60,6 +60,13 @@ const SECTION_TITLE = Object.fromEntries(SECTIONS.map((s) => [s.id, s.title]))
 
 const pad = (n) => String(n).padStart(4, '0')
 
+// 아직 기록이 없을 때: 무엇을 하면 되는지까지 알려 준다
+const NOTHING_YET = [
+  '이 세션에서 아직 기록된 변경이 없습니다.',
+  'Claude에게 파일을 고치게 하고, 그 턴이 끝난 뒤 /explain 을 입력하세요.',
+  '(이 mod를 불러오기 전에 한 변경은 기록되지 않습니다)',
+].join('\n')
+
 // 이 mod는 관찰만 하므로, 훅이 실패해도 원래 동작은 그대로 진행한다.
 // .catch 안의 next는 다시 불러도 안전하다: 이미 실행됐으면 그 결과를, 아니면 한 번만 실행한다
 const passThrough = ($, e, next) => next(e)
@@ -481,7 +488,7 @@ export function register(on) {
   // /explain: 마지막 변경 턴의 diff 창을 연다. 창을 그릴 수 없는 곳(claude -p 등)에서는 텍스트로 답한다
   on('command.run', { command: 'explain' }, async ($) => {
     const rec = await latestRecord($)
-    if (!rec) return { text: '이 세션에서 아직 기록된 변경이 없습니다.' }
+    if (!rec) return { text: NOTHING_YET }
     const textAnswer = () => {
       const changed = rec.files.filter((f) => f.changed)
       return [
@@ -507,7 +514,7 @@ export function register(on) {
     const id = (e.args || '').trim() || 'summary'
     if (!SECTION_TITLE[id]) return { text: '섹션 이름: ' + SECTIONS.map((s) => s.id).join(', ') }
     const rec = await latestRecord($)
-    if (!rec) return { text: '이 세션에서 아직 기록된 변경이 없습니다.' }
+    if (!rec) return { text: NOTHING_YET }
     view = await loadView($, rec)
     const context = turnContext(view.turn, view.files, learning)
     const r = await ask($, sectionPrompt(id, context), id, context)
