@@ -1,0 +1,6 @@
+{
+  "name": "explain-preview",
+  "version": "0.1.0",
+  "description": "change-explainer 해설 창 디자인 확인용 샘플 (고정 데이터, 모델 호출 없음)",
+  "author": { "name": "siglee" }
+}
