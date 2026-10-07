@@ -1,6 +1,6 @@
 # 변경 해설 mod (`change-explainer`) 명세
 
-> 상태: v0.4 · 2026-10-08 (1단계 변경 수집, 2단계 diff 창 구현)
+> 상태: v0.5 · 2026-10-08 (1단계 변경 수집, 2단계 diff 창, 3단계 해설 생성 구현)
 > 대상 Claude Code: v2.1.287 이상 (개발·검증 2.1.292)
 > 디자인 샘플: `samples/explain-preview/` (고정 데이터, 모델 호출 없음)
 > 참고: [mods 개요](https://code.claude.com/docs/ko/plugins/mods/overview) · [teach 스킬](https://github.com/mattpocock/skills/blob/main/skills/productivity/teach/SKILL.md) · [wait-what 스킬](https://github.com/mattpocock/skills/blob/main/docs/productivity/wait-what.md)
@@ -216,7 +216,13 @@ type Answer    = { text: string }
 - 저장하는 것: 퀴즈 통과(턴), `Known`으로 표시한 용어, `Wait, what?`을 여러 번 누른 섹션(막혔던 지점).
 - 다음 해설을 만들 때 프롬프트에 넣는다: Known 용어는 짧게, 막혔던 개념은 처음부터 풀어서.
 
-### 5.7 정직성
+### 5.7 개발용 확인 명령
+
+`/explain-check <섹션>`: 마지막 변경 턴의 섹션 하나를 실제 모델로 만들어 검증한 JSON을 글로 출력한다. 창이 없는 `claude -p --continue`에서도 동작하므로 프롬프트를 고칠 때 품질을 바로 확인할 수 있다.
+
+실제 모델 확인 결과(2.1.292, 재시도 추가 예제): 요약·코드 따라가기·시퀀스·퀴즈 모두 한 번에 형식 통과. 요약의 hunkNotes 개수가 변경 블록 수와 일치, 근거 없는 이유에 (추정) 표시, 삭제 코드 위치를 `경로:줄 (삭제)`로 지정. 퀴즈가 작업 과정(권한 거부 등)을 묻는 문제를 낸 것을 보고, "코드의 동작과 설계 이유만 묻는다" 규칙을 추가했다.
+
+### 5.8 정직성
 
 "왜"는 Claude의 실제 내부 추론이 아니라 **대화 기록을 바탕으로 재구성**한 것이다. 창 맨 아래에 이를 밝힌다. 지난 세션은 `근거: 저장된 기록 일부`로 표시한다.
 
@@ -291,7 +297,8 @@ type Answer    = { text: string }
 - **시간 제한**: 훅 자체 10초(모델·파일 대기 시간 제외). 생성은 버튼 콜백에서 시작하고 결과는 다시 그리기로 반영.
 - **확인이 남은 것**
   - [ ] Orca에서 diff 배경색, 휠 스크롤(코드 영역만), 섹션 이동 스크롤이 실제로 동작하는지 (자동 테스트로는 확인 불가)
-  - [ ] `$.model.fork`의 옵션(`maxTokens`, `timeoutMs`)과 응답 형태, JSON 출력 안정성
+  - [x] `$.model.fork`: 옵션은 `prompt` 하나. 도구는 모두 막힌 채 현재 대화에 질문 하나를 붙여 답만 받는다. `/clear` 직후 등은 `nothing-to-fork` → `$.model.complete`(세션 모델)로 대신
+  - [x] 실제 모델의 JSON 출력: 네 섹션 한 번에 통과 (5.7)
   - [x] `$.fs.write`가 디렉터리를 자동 생성함 (타입 문서, 실제 세션에서 확인)
   - [x] 서브에이전트 구분과 턴 귀속 (`tool.call`의 `agentId`, `agent.spawn` 결과의 `agentId`)
   - [x] 실제 `claude -p` 세션에서 수정·새 파일 기록 확인 (2.1.292)
