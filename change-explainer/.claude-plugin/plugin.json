@@ -1,0 +1,6 @@
+{
+  "name": "change-explainer",
+  "version": "0.1.0",
+  "description": "Claude가 턴마다 바꾼 코드를 기록하고, 무엇을 왜 어떻게 바꿨는지 터미널 창에서 해설합니다",
+  "author": { "name": "siglee" }
+}

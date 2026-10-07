@@ -50,6 +50,15 @@ for (const cols of [40, 60, 100]) {
   })
 }
 
+test('목차에서 섹션을 누르면 펼쳐진다', async ($, on) => {
+  const { clock } = stubs(on)
+  const ui = await $.ui.mount(pane(60))
+  await ui.press({ key: 'toc-walk' })
+  await clock.advance(800)
+  expect(await ui.find({ type: 'Text', text: '재시도 대상 판별' })).toBeDefined()
+  expect(await ui.find({ key: 'toc-walk' })).toMatchObject({ props: { label: '3 코드 따라가기 ●' } })
+})
+
 test('섹션 제목을 누르면 그 섹션만 펼쳐진다', async ($, on) => {
   const { clock } = stubs(on)
   const ui = await $.ui.mount(pane(60))

@@ -34,9 +34,8 @@ let easy = {}
 let known = []
 // 확인 퀴즈: 문제별 보기 순서(섞은 결과)와 고른 보기. 보기 원래 위치 0이 정답
 let quiz = newQuiz()
-// 마지막으로 펼친 섹션: r(다시 만들기)의 대상. j/k가 이동할 섹션 위치
+// 마지막으로 펼친 섹션: r(다시 만들기)의 대상
 let current = 'summary'
-let cursor = 0
 // 퀴즈를 다 맞혀서 이 턴을 이해했다고 표시했는지 (다음에도 기억)
 let understood = false
 // 질문과 답변: [{ q, a }], a가 null이면 답을 만드는 중
@@ -158,7 +157,6 @@ export function register(on) {
       open = { ...open, [id]: !open[id] }
       if (open[id]) {
         current = id
-        cursor = SECTIONS.findIndex((s) => s.id === id)
         if (gen[id] === 'none') generate($, id)
       }
       saveOpen()
@@ -240,15 +238,26 @@ export function register(on) {
             if (!open.quiz) toggle('quiz', true)
             else reveal('sec-quiz')
           } }),
-          btn(el, { key: 'sec-next', hotkey: 'j', label: '다음 섹션', onPress: () => {
-            cursor = clamp(cursor + 1, 0, SECTIONS.length - 1)
-            reveal('sec-' + SECTIONS[cursor].id)
-          } }),
-          btn(el, { key: 'sec-prev', hotkey: 'k', label: '이전 섹션', onPress: () => {
-            cursor = clamp(cursor - 1, 0, SECTIONS.length - 1)
-            reveal('sec-' + SECTIONS[cursor].id)
-          } }),
         ])] }),
+        // 목차: 섹션 이름을 누르면 펼치고 그 위치로 이동한다
+        el.Box({
+          marginTop: 1,
+          flexDirection: 'column',
+          children: [
+            el.Text({ bold: true, color: C.dim, children: ['목차'] }),
+            buttonRow(el, SECTIONS.map((sec) =>
+              btn(el, {
+                key: 'toc-' + sec.id,
+                label: sec.key + ' ' + sec.title + (gen[sec.id] === 'done' ? ' ●' : ''),
+                dim: !open[sec.id],
+                onPress: () => {
+                  if (!open[sec.id]) toggle(sec.id, true)
+                  else reveal('sec-' + sec.id)
+                },
+              }),
+            )),
+          ],
+        }),
       ],
     })
 
@@ -449,7 +458,7 @@ export function register(on) {
         ...body,
         ask,
         rule(el, cols),
-        el.Text({ color: C.faint, children: ['휠·↑↓·PgUp/PgDn 위아래  j/k 섹션 이동  1–9 펼치기  Esc 닫기'] }),
+        el.Text({ color: C.faint, children: ['휠·↑↓·PgUp/PgDn 위아래  목차로 섹션 이동  1–9 펼치기·접기  Esc 닫기'] }),
         el.Text({ color: C.faint, children: ['대화 기록을 바탕으로 재구성한 해설입니다. 실제 내부 추론과 다를 수 있습니다.'] }),
       ],
     })
