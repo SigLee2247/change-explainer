@@ -4,7 +4,7 @@
 
 import { C, EASY, EASY_AGAIN, EASY_AGAIN_DEFAULT, EASY_ASK_AFTER, FILES, HUNKS, QUIZ, SAMPLE_ANSWER, SECTION_ANSWER, SECTIONS, TURN } from './data.js'
 import {
-  backgroundView, baView, btn, buttonRow, diffCodeRows, diffModel, diffView, flowView, impactView, quizView, rich, rule,
+  backgroundView, baView, btn, buttonRow, link, diffCodeRows, diffModel, diffView, flowView, impactView, quizView, rich, rule,
   seqMaxLeft, seqView, summaryView, termsView, walkView,
 } from './views.js'
 
@@ -41,7 +41,6 @@ let understood = false
 // 질문과 답변: [{ q, a }], a가 null이면 답을 만드는 중
 let qa = []
 
-const titleOf = (id) => SECTIONS.find((s) => s.id === id).title
 
 // 보기 순서를 섞는다. 모델은 정답을 첫 번째에 두는 버릇이 있어서 순서는 코드가 정한다
 function shuffled(n) {
@@ -224,39 +223,38 @@ export function register(on) {
           ],
         }),
         el.Box({ marginTop: 1, children: [buttonRow(el, [
-          btn(el, { key: 'diff', hotkey: 'd', label: 'diff 보기', primary: true, onPress: () => showDiff() }),
+          btn(el, { key: 'diff', hotkey: 'd', label: 'diff', primary: true, onPress: () => showDiff() }),
           btn(el, { key: 'all', hotkey: 'a', label: allOpen ? '모두 접기' : '모두 펼치기', onPress: () => {
             const target = !allOpen
             SECTIONS.forEach((s) => { if (!!open[s.id] !== target) toggle(s.id, false) })
           } }),
-          btn(el, { key: 'regen', hotkey: 'r', label: '다시 만들기 (' + titleOf(current) + ')', dim: gen[current] === 'loading', onPress: () => {
+          btn(el, { key: 'regen', hotkey: 'r', label: '다시 만들기', dim: gen[current] === 'loading', onPress: () => {
             if (gen[current] === 'loading') return
             if (!open[current]) toggle(current, true)
             else generate($, current)
           } }),
-          btn(el, { key: 'go-quiz', hotkey: 'q', label: understood ? '퀴즈 다시 보기' : '퀴즈로 확인', onPress: () => {
+          btn(el, { key: 'go-quiz', hotkey: 'q', label: '퀴즈', onPress: () => {
             if (!open.quiz) toggle('quiz', true)
             else reveal('sec-quiz')
           } }),
         ])] }),
-        // 목차: 섹션 이름을 누르면 펼치고 그 위치로 이동한다
+        // 목차: 대괄호 없는 글자 링크. 펼친 섹션은 밝게, 접힌 섹션은 흐리게. 누르면 펼치고 그 위치로 이동
         el.Box({
           marginTop: 1,
-          flexDirection: 'column',
-          children: [
-            el.Text({ bold: true, color: C.dim, children: ['목차'] }),
-            buttonRow(el, SECTIONS.map((sec) =>
-              btn(el, {
-                key: 'toc-' + sec.id,
-                label: sec.key + ' ' + sec.title + (gen[sec.id] === 'done' ? ' ●' : ''),
-                dim: !open[sec.id],
-                onPress: () => {
-                  if (!open[sec.id]) toggle(sec.id, true)
-                  else reveal('sec-' + sec.id)
-                },
-              }),
-            )),
-          ],
+          flexDirection: 'row',
+          flexWrap: 'wrap',
+          children: SECTIONS.flatMap((sec, i) => [
+            ...(i ? [el.Text({ color: C.faint, children: ['  ·  '] })] : []),
+            link(el, {
+              key: 'toc-' + sec.id,
+              label: sec.key + ' ' + sec.title,
+              dim: !open[sec.id],
+              onPress: () => {
+                if (!open[sec.id]) toggle(sec.id, true)
+                else reveal('sec-' + sec.id)
+              },
+            }),
+          ]),
         }),
       ],
     })

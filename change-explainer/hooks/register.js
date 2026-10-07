@@ -1,6 +1,6 @@
 // change-explainer: Claude가 턴마다 바꾼 파일을 기록하고, 원할 때 해설한다.
 //
-// 1단계(이 파일): 변경 수집과 저장
+// 1단계: 변경 수집과 저장 / 2단계: diff 창
 // - 턴에서 파일을 처음 건드리기 직전의 내용(변경 전)과 턴이 끝난 뒤의 내용(변경 후)을 남긴다
 // - 서브에이전트의 수정은 그 서브에이전트를 실행한 메인 턴에 붙인다
 // - 도구 호출은 관찰만 한다. 막거나 바꾸지 않고 next(e)의 결과를 그대로 돌려준다
@@ -10,6 +10,8 @@
 //   turns/<순번>-<turnId>/turn.json   턴 기록 (요청문, 답변, 파일별 줄 수)
 //   turns/<순번>-<turnId>/before/…    변경 전 스냅숏, after/… 변경 후 스냅숏
 
+import { buildRows } from './diff.js'
+import { diffCodeRows, diffModel, diffView, hunkList } from './views/diff.js'
 import {
   EDIT_TOOLS, MAX_FILE_BYTES, absolutePath, editedPath, looksBinary, newFileEntry, newTurn, recordEdit,
   repoFolder, storedPath, turnRecord, turnSummary,
@@ -31,6 +33,19 @@ let agentTurn = {}
 let agentType = {}
 // 마지막으로 저장한 변경 턴 기록
 let lastRecord = null
+
+// ── 창 상태 ──
+const PANE = 'change-explainer'
+const WANT_COLUMNS = 120
+const STEP_ROWS = 5
+const STEP_COLS = 8
+// 창에 띄운 턴: { turn: 턴 기록, files: [{ ...파일 기록, rows, hunks }] }
+let view = null
+// diff: 보고 있는 변경 블록, 코드 영역의 위쪽 줄과 가로 밀림, 휠 스크롤 한계
+let pos = 0
+let diffTop = 0
+let diffLeft = 0
+let diffMaxTop = 0
 
 const pad = (n) => String(n).padStart(4, '0')
 
@@ -121,6 +136,38 @@ async function saveTurn($, turnId) {
   c.session = { ...c.session, turns: [...others, summary].sort((a, b) => a.seq - b.seq) }
   await $.fs.write(c.base + '/session.json', JSON.stringify(c.session, null, 2))
   lastRecord = record
+}
+
+// ── 창에 띄울 턴 불러오기 ────────────────────────────────────
+
+const turnDir = (c, rec) => c.base + '/turns/' + pad(rec.seq) + '-' + rec.turnId
+
+async function readOrNull($, path) {
+  try { return await $.fs.read(path) } catch { return null }
+}
+
+// 마지막 변경 턴: 메모리에 없으면(mod를 다시 불러온 뒤 등) 세션 기록에서 찾는다
+async function latestRecord($) {
+  if (lastRecord) return lastRecord
+  const c = await ensureCtx($)
+  const last = c.session.turns[c.session.turns.length - 1]
+  if (!last) return null
+  const text = await readOrNull($, turnDir(c, last) + '/turn.json')
+  return text ? JSON.parse(text) : null
+}
+
+// 턴 기록과 스냅숏으로 화면 데이터를 만든다
+async function loadView($, rec) {
+  const c = await ensureCtx($)
+  const dir = turnDir(c, rec)
+  const files = []
+  for (const f of rec.files.filter((x) => x.changed)) {
+    if (f.skipped) { files.push({ ...f, rows: [], hunks: 0 }); continue }
+    const before = f.isNew ? null : await readOrNull($, dir + '/before/' + f.path)
+    const after = await readOrNull($, dir + '/after/' + f.path)
+    files.push({ ...f, ...buildRows(before, after || '') })
+  }
+  return { turn: rec, files }
 }
 
 // ── 훅 ─────────────────────────────────────────────────────
@@ -233,20 +280,74 @@ export function register(on) {
     return next(e)
   }).catch(passThrough)
 
-  // 지금은 기록이 제대로 쌓이는지 보는 텍스트. 해설 창은 다음 단계에서 붙인다
+  // /explain: 마지막 변경 턴의 diff 창을 연다. 창을 그릴 수 없는 곳(claude -p 등)에서는 텍스트로 답한다
   on('command.run', { command: 'explain' }, async ($) => {
-    if (!lastRecord) return { text: '이 세션에서 아직 기록된 변경이 없습니다.' }
-    const r = lastRecord
-    const lines = [
-      '#' + r.seq + '  ' + r.title,
-      '파일 ' + r.files.filter((f) => f.changed).length + '개  +' + r.added + ' −' + r.removed,
-      ...r.files.map((f) => {
-        const tag = f.skipped ? '내용 생략(' + f.skipped + ')' : f.isNew ? '새 파일' : f.changed ? '수정' : '변화 없음'
-        const who = f.agents.length ? '  · 서브에이전트 ' + f.agents.map((a) => a.type || a.agentId).join(', ') : ''
-        return '  ' + f.path + '  ' + tag + '  +' + f.added + ' −' + f.removed + who
-      }),
-      '기록: ' + ctx.base + '/turns/' + pad(r.seq) + '-' + r.turnId,
-    ]
-    return { text: lines.join('\n') }
+    const rec = await latestRecord($)
+    if (!rec) return { text: '이 세션에서 아직 기록된 변경이 없습니다.' }
+    const textAnswer = () => {
+      const changed = rec.files.filter((f) => f.changed)
+      return [
+        '#' + rec.seq + '  ' + rec.title,
+        '파일 ' + changed.length + '개  +' + rec.added + ' −' + rec.removed,
+        ...changed.map((f) => {
+          const tag = f.skipped ? '내용 생략(' + f.skipped + ')' : f.isNew ? '새 파일' : '수정'
+          const who = f.agents.length ? '  · 서브에이전트 ' + f.agents.map((a) => a.type || a.agentId).join(', ') : ''
+          return '  ' + f.path + '  ' + tag + '  +' + f.added + ' −' + f.removed + who
+        }),
+      ].join('\n')
+    }
+    // 화면이 없는 실행(claude -p)에서는 창을 열지 않고 글로 답한다
+    if (!(await $.session.surfaces()).length) return { text: textAnswer() }
+    view = await loadView($, rec)
+    pos = 0
+    diffTop = 0
+    diffLeft = 0
+    const opened = await $.ui.open({ id: PANE, title: '변경 해설', focus: true, closeOnEscape: true, columns: WANT_COLUMNS })
+    if (opened && opened.isPlaced) return {}
+    return { text: textAnswer() + '\n(창이 아직 열리지 않았습니다: ' + ((opened && opened.reason) || '터미널이 좁음') + ')' }
+  })
+
+  // diff 창에서는 휠과 스크롤 키로 창 전체가 아니라 코드 영역만 움직인다
+  on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
+    if (!view) return next(e)
+    diffTop = Math.max(0, Math.min(diffMaxTop, diffTop + e.by))
+    $.ui.invalidate('ui.render')
+    return {}
+  })
+
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    if (e.requestId !== PANE) return next(e)
+    const el = $.ui.resolve(e)
+    if (!view) return el.Text({ color: '#858b94', children: ['/explain 으로 마지막 변경을 엽니다.'] })
+    const cols = e.props.bodyColumns || 100
+    const bodyRows = (e.props.scroll && e.props.scroll.bodyRows) || 30
+    const redraw = () => $.ui.invalidate('ui.render')
+    const hunks = hunkList(view.files)
+    const m = diffModel(cols, view.files, pos)
+    diffMaxTop = Math.max(0, m.lines.length - diffCodeRows(bodyRows))
+    diffTop = Math.min(diffTop, diffMaxTop)
+    diffLeft = Math.min(diffLeft, m.maxLeft)
+
+    // 변경 블록으로 이동: 그 블록이 코드 영역 위쪽에 오도록
+    const goTo = (n) => {
+      pos = Math.max(0, Math.min(hunks.length - 1, n))
+      diffTop = Math.max(0, diffModel(cols, view.files, pos).hunkStart - 2)
+      diffLeft = 0
+      redraw()
+    }
+    const firstHunkOf = (f) => {
+      const i = hunks.findIndex((h) => h.f === f)
+      return i < 0 ? pos : i
+    }
+    return diffView(el, cols, bodyRows, { turn: view.turn, files: view.files, pos, top: diffTop, left: diffLeft }, {
+      prev: () => goTo(pos - 1),
+      next: () => goTo(pos + 1),
+      nextFile: () => goTo(firstHunkOf(((hunks[pos] ? hunks[pos].f : 0) + 1) % view.files.length)),
+      pickFile: (f) => goTo(firstHunkOf(f)),
+      up: () => { diffTop = Math.max(0, diffTop - STEP_ROWS); redraw() },
+      down: () => { diffTop = Math.min(diffMaxTop, diffTop + STEP_ROWS); redraw() },
+      leftward: () => { diffLeft = Math.max(0, diffLeft - STEP_COLS); redraw() },
+      rightward: () => { diffLeft = Math.min(m.maxLeft, diffLeft + STEP_COLS); redraw() },
+    })
   })
 }

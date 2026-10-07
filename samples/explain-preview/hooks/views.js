@@ -23,9 +23,16 @@ export function rich(el, parts, opts) {
 // 대괄호 버튼은 단축키를 따로 표시하지 않으므로 라벨 앞에 키를 넣는다.
 // primary는 화면마다 하나만 두는 주요 버튼(터미널에서 강조색)
 export function btn(el, { key, hotkey, label, onPress, primary, dim }) {
-  const props = { key, label: hotkey ? hotkey + '  ' + label : label, onPress }
+  const props = { key, label: hotkey ? hotkey + ' ' + label : label, onPress }
   if (hotkey) props.hotkey = hotkey
   if (primary) props.variant = 'primary'
+  if (dim) props.dimColor = true
+  return el.Button(props)
+}
+
+// 대괄호 없는 글자 링크: 목차처럼 여러 개를 늘어놓을 때. 누를 수 있고, 흐리게 하면 보조 항목
+export function link(el, { key, label, onPress, dim }) {
+  const props = { key, label, plain: true, onPress }
   if (dim) props.dimColor = true
   return el.Button(props)
 }
