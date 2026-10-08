@@ -1,88 +1,80 @@
-// 작업 목록 창: 이 세션의 턴과, 저장소별 브랜치(워크트리) 작업. 고르면 해설 창이 열린다.
+// 작업 목록 창: 이 세션의 턴과 지난 세션들. 지난 세션은 펼치면 그 세션의 턴을 대화 기록에서 복원한다.
 //
 // st = {
-//   status: 'loading' | 'done', progress,
-//   turns: [{ seq, turnId, title, files, added, removed, understood }],
-//   repos: [{ key, name, base, baseOptions: [브랜치], items: [{ id, path, branch, ticket, ahead, files, added, removed, date, subject, understood, dirty }] }],
+//   status, progress, error,
+//   turns: [{ seq, turnId, title, files, added, removed, understood }],          이 세션 (실시간 기록)
+//   sessions: [{ id, title, at, status: 'idle' | 'loading' | 'open', turns }],   지난 세션
+//     turns: [{ seq, id, request, files, commits, understood }]  (실제로 바뀐 것이 있는 턴만)
+//   usage: { calls, input, output, cacheRead, cacheWrite }                        이 저장소에서 해설에 쓴 토큰
 // }
 
 import { C, btn, buttonRow, link, rich, rule } from './common.js'
 
-const day = (iso) => (iso ? iso.slice(5, 10) : '')
+const day = (iso) => (iso ? iso.slice(5, 16).replace('T', ' ') : '')
 
-function meta(el, x) {
-  return rich(el, [
-    '    ',
-    x.ahead !== undefined ? ['커밋 ' + x.ahead + '  ·  ', C.dim] : '',
-    ['파일 ' + x.files + '  ', C.dim],
-    ['+' + x.added, C.green], ' ', ['−' + x.removed, C.red],
-    x.dirty ? ['  ·  커밋 안 한 변경 있음', C.accent] : '',
-    x.date ? ['  ·  ' + day(x.date), C.dim] : '',
-    ['  ·  ', C.dim],
-    x.understood ? ['✓ 이해함', C.green, true] : ['○ 아직', C.faint],
-  ], { wrap: 'truncate-end' })
+// 1234 → 1.2k
+export const k = (n) => (n >= 10000 ? Math.round(n / 1000) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n))
+
+export function usageText(u) {
+  if (!u || !u.calls) return '아직 없음'
+  return '호출 ' + u.calls + '회 · 입력 ' + k(u.input + u.cacheRead + u.cacheWrite) + ' (캐시 읽기 ' + k(u.cacheRead) + ') · 출력 ' + k(u.output)
 }
+
+const mark = (understood) => (understood ? ['✓ 이해함', C.green, true] : ['○ 아직', C.faint])
 
 export function listView(el, cols, st, on) {
   const out = [
-    rich(el, [['작업 목록  ', C.accent, true], ['고르면 해설 창이 열립니다. 아직 이해하지 않은 작업은 ○', C.dim]]),
+    rich(el, [['작업 목록  ', C.accent, true], ['고르면 해설 창이 열립니다. 아직 이해하지 않은 턴은 ○', C.dim]]),
+    rich(el, [['해설에 쓴 토큰 (이 저장소 누적)  ', C.faint], [usageText(st.usage), C.dim]], { wrap: 'truncate-end' }),
     el.Box({ marginTop: 1, children: [buttonRow(el, [
       btn(el, { key: 'refresh', hotkey: 'r', label: '다시 찾기', dim: st.status === 'loading', onPress: on.refresh }),
       ...(on.back ? [btn(el, { key: 'back', hotkey: 'b', label: '해설로', onPress: on.back })] : []),
     ])] }),
   ]
 
-  if (st.turns.length) {
-    out.push(rule(el, cols), el.Text({ bold: true, color: C.title, children: ['이 세션의 턴'] }))
-    for (const t of [...st.turns].reverse()) {
-      out.push(el.Box({
-        flexDirection: 'column',
-        children: [
-          link(el, { key: 'turn-' + t.turnId, label: '#' + t.seq + '  ' + t.title, onPress: () => on.openTurn(t) }),
-          meta(el, t),
-        ],
-      }))
-    }
-  }
-
-  for (const repo of st.repos) {
-    out.push(rule(el, cols))
+  out.push(rule(el, cols), el.Text({ bold: true, color: C.title, children: ['이 세션'] }))
+  if (!st.turns.length) out.push(el.Text({ color: C.faint, children: ['  아직 기록된 변경이 없습니다.'] }))
+  for (const t of [...st.turns].reverse()) {
     out.push(el.Box({
-      flexDirection: 'row',
-      flexWrap: 'wrap',
-      columnGap: 2,
+      flexDirection: 'column',
       children: [
-        el.Text({ bold: true, color: C.title, children: [repo.name] }),
-        el.Select({
-          key: 'base-' + repo.key,
-          label: '기준',
-          value: repo.base,
-          options: repo.baseOptions.map((b) => ({ value: b, label: b === 'auto' ? '자동: 브랜치를 만든 시점' : b })),
-          onSelect: (value) => on.setBase(repo, value),
-        }),
+        link(el, { key: 'turn-' + t.turnId, label: '#' + t.seq + '  ' + t.title, onPress: () => on.openTurn(t) }),
+        rich(el, ['    ', ['파일 ' + t.files + '  ', C.dim], ['+' + t.added, C.green], ' ', ['−' + t.removed, C.red], ['  ·  ', C.dim], mark(t.understood)], { wrap: 'truncate-end' }),
       ],
     }))
-    if (!repo.items.length) {
-      out.push(el.Text({ color: C.faint, children: ['  진행 중인 브랜치 작업이 없습니다.'] }))
+  }
+
+  out.push(rule(el, cols), el.Text({ bold: true, color: C.title, children: ['지난 세션'] }))
+  if (!st.sessions.length && st.status !== 'loading') out.push(el.Text({ color: C.faint, children: ['  이 프로젝트의 지난 대화 기록이 없습니다.'] }))
+  for (const ses of st.sessions) {
+    const isOpen = ses.status === 'open'
+    out.push(link(el, { key: 'ses-' + ses.id, label: (isOpen ? '▾ ' : '▸ ') + day(ses.at) + '  ' + ses.title, onPress: () => on.toggleSession(ses) }))
+    if (ses.status === 'loading') out.push(el.Text({ color: C.dim, children: ['    대화 기록에서 턴을 복원하는 중…'] }))
+    if (!isOpen) continue
+    if (!ses.turns.length) {
+      out.push(el.Text({ color: C.faint, children: ['    파일을 바꾼 턴이 없습니다.'] }))
       continue
     }
-    for (const x of repo.items) {
+    for (const t of ses.turns) {
       out.push(el.Box({
         flexDirection: 'column',
+        paddingLeft: 4,
         children: [
-          link(el, { key: 'item-' + x.id, label: (x.ticket ? x.ticket + '  ' : '') + (x.subject || x.branch), onPress: () => on.openBranch(repo, x) }),
-          rich(el, ['    ', [x.branch, C.blue], ['  ' + x.path.split('/').pop() + '  ·  기준 ' + x.baseLabel, C.faint]], { wrap: 'truncate-end' }),
-          meta(el, x),
+          link(el, { key: 'past-' + t.id, label: '#' + t.seq + '  ' + t.request.split('\n')[0].slice(0, 70), onPress: () => on.openPast(ses, t) }),
+          rich(el, [
+            '    ',
+            t.files ? ['Edit/Write 파일 ' + t.files, C.dim] : '',
+            t.files && t.commits ? ['  ·  ', C.dim] : '',
+            t.commits ? ['커밋 ' + t.commits + '개', C.dim] : '',
+            ['  ·  ', C.dim],
+            mark(t.understood),
+          ], { wrap: 'truncate-end' }),
         ],
       }))
     }
   }
 
-  if (st.status === 'loading') {
-    out.push(rule(el, cols), el.Text({ color: C.dim, children: [st.progress || '작업을 찾는 중…'] }))
-  } else if (!st.turns.length && !st.repos.length) {
-    out.push(rule(el, cols), el.Text({ color: C.dim, children: ['가져올 작업이 없습니다. 이 프로젝트의 대화 기록에서 다룬 git 저장소를 찾지 못했습니다.'] }))
-  }
+  if (st.status === 'loading') out.push(rule(el, cols), el.Text({ color: C.dim, children: [st.progress || '찾는 중…'] }))
   if (st.error) out.push(el.Text({ color: C.red, children: [st.error] }))
-  return el.Box({ flexDirection: 'column', rowGap: 0, children: out })
+  return el.Box({ flexDirection: 'column', children: out })
 }

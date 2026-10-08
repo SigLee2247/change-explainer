@@ -1,6 +1,6 @@
 // change-explainer: Claude가 턴마다 바꾼 파일을 기록하고, 원할 때 해설한다.
 //
-// 1단계: 변경 수집과 저장 / 2단계: diff 창 / 3단계: 해설 생성과 해설 창 / 4단계: 작업 목록(이 세션의 턴, 브랜치 작업)
+// 1단계: 변경 수집과 저장 / 2단계: diff 창 / 3단계: 해설 생성과 해설 창 / 4단계: 작업 목록(이 세션과 지난 세션의 턴)
 // - 턴에서 파일을 처음 건드리기 직전의 내용(변경 전)과 턴이 끝난 뒤의 내용(변경 후)을 남긴다
 // - 서브에이전트의 수정은 그 서브에이전트를 실행한 메인 턴에 붙인다
 // - Bash로 바꾼 파일도 잡는다: Bash가 건드리는 git 저장소의 상태를 턴에서 처음 건드릴 때 남기고,
@@ -13,9 +13,11 @@
 //   turns/<순번>-<turnId>/before/…    변경 전 스냅숏, after/… 변경 후 스냅숏
 //   turns/<순번>-<turnId>/views/…     생성한 섹션(JSON), Wait what 대화와 질문
 // 저장소 단위: ~/.claude/explanations/<저장소>-<해시>/learning.json   Known 용어, 막혔던 섹션
-// 브랜치 작업:  ~/.claude/explanations/<워크트리>-<해시>/branches/<브랜치>/   턴과 같은 형식
+//               ~/.claude/explanations/<저장소>-<해시>/usage.json      해설에 쓴 토큰 누적
+// 지난 세션의 턴도 같은 위치·형식으로 남는다 (대화 기록과 git에서 복원)
 
-import { baseCandidates, candidateDirs, commandDirs, parseStatus, setTicketPattern, conversationExcerpt, parseNameStatus, parseShortstat, parseWorktrees, projectDirName, slug, ticketKey } from './branches.js'
+import { commandDirs, parseNameStatus, parseStatus, projectDirName } from './git.js'
+import { isWorkPath, parseLog, promptText, turnsFromTranscript } from './history.js'
 import { buildRows } from './diff.js'
 import { SECTIONS, setLanguage, answerPrompt, easyPrompt, parseAt, retryPrompt, sectionPrompt, turnContext, validate } from './generate.js'
 import { applyTheme } from './views/common.js'
@@ -60,7 +62,7 @@ let diffMaxTop = 0
 let mode = 'explain'
 // 작업 목록 상태 (views/list.js 참고)
 let list = null
-// 플러그인 설정 (userConfig): base_branches, language, theme, model, ticket_pattern
+// 플러그인 설정 (userConfig): language, theme, model
 let options = {}
 // 띄운 턴의 해설 상태: { dir, sections, open, current, threads, qa, quiz, seqLeft, understood }
 let ex = null
@@ -327,8 +329,8 @@ async function callModel($, prompt) {
   const c = await ensureCtx($)
   if (!view || view.turn.sessionId === c.sessionId) {
     const r = await $.model.fork({ prompt })
-    if (r.isAnswered) return { text: r.text }
-    if (r.reason !== 'nothing-to-fork') return { error: r.reason + (r.status ? ' ' + r.status : '') }
+    if (r.isAnswered) return { text: r.text, usage: r.usage }
+    if (r.reason !== 'nothing-to-fork') return { error: r.reason + (r.status ? ' ' + r.status : ''), usage: r.usage }
   }
   // 설정 model이 있으면 그것, 없으면 세션 모델
   let model = options.model && options.model !== 'session' ? options.model : 'sonnet'
@@ -342,16 +344,52 @@ async function callModel($, prompt) {
     maxTokens: 4000,
     timeoutMs: 120000,
   })
-  return r.isAnswered ? { text: r.text } : { error: r.reason + (r.status ? ' ' + r.status : '') }
+  return r.isAnswered ? { text: r.text, usage: r.usage } : { error: r.reason + (r.status ? ' ' + r.status : ''), usage: r.usage }
 }
 
-// 프롬프트를 보내고 kind 형식으로 검증한다. 형식이 틀리면 한 번 더 요청한다
-async function ask($, prompt, kind, check) {
+// ── 토큰 사용량 ──
+// 모델이 보고한 사용량을 해설 단위(턴)와 저장소 단위로 쌓는다
+
+const emptyUsage = () => ({ calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
+
+function addUsage(total, u) {
+  if (!u) return total
+  return {
+    calls: total.calls + 1,
+    input: total.input + (u.input_tokens || 0),
+    output: total.output + (u.output_tokens || 0),
+    cacheRead: total.cacheRead + (u.cache_read_input_tokens || 0),
+    cacheWrite: total.cacheWrite + (u.cache_creation_input_tokens || 0),
+  }
+}
+
+// 저장소 누적 사용량 (작업 목록에 보인다)
+let repoUsage = null
+
+async function recordUsage($, target, u) {
+  if (!u) return
+  const c = await ensureCtx($)
+  if (!repoUsage) {
+    const saved = await readOrNull($, c.repoBase + '/usage.json')
+    try { repoUsage = saved ? { ...emptyUsage(), ...JSON.parse(saved) } : emptyUsage() } catch { repoUsage = emptyUsage() }
+  }
+  repoUsage = addUsage(repoUsage, u)
+  await saveJson($, c.repoBase + '/usage.json', repoUsage)
+  if (target) {
+    target.usage = addUsage(target.usage || emptyUsage(), u)
+    await saveJson($, target.dir + '/views/usage.json', target.usage)
+  }
+}
+
+// 프롬프트를 보내고 kind 형식으로 검증한다. 형식이 틀리면 한 번 더 요청한다. 쓴 토큰은 target에 기록
+async function ask($, prompt, kind, check, target) {
   let reply = await callModel($, prompt)
+  await recordUsage($, target, reply.usage)
   if (reply.error) return { ok: false, error: '모델 응답 없음(' + reply.error + ')' }
   let v = validate(kind, reply.text, check)
   if (v.ok) return v
   reply = await callModel($, prompt + '\n\n' + retryPrompt(v.error))
+  await recordUsage($, target, reply.usage)
   if (reply.error) return { ok: false, error: '모델 응답 없음(' + reply.error + ')' }
   v = validate(kind, reply.text, check)
   return v.ok ? v : { ok: false, error: '형식이 맞지 않음(' + v.error + ')' }
@@ -372,7 +410,7 @@ async function generateSection($, id) {
   target.sections[id] = { status: 'loading', data: null, error: null }
   $.ui.invalidate('ui.render')
   const context = turnContext(v.turn, v.files, learning)
-  const r = await ask($, sectionPrompt(id, context), id, context)
+  const r = await ask($, sectionPrompt(id, context), id, context, target)
   if (r.ok) {
     target.sections[id] = { status: 'done', data: r.value, error: null }
     if (id === 'quiz') target.quiz = newQuiz(r.value)
@@ -400,7 +438,7 @@ async function explainEasier($, id) {
     learning = { ...learning, stuck: [...learning.stuck, title].slice(-20) }
     await saveLearning($)
   }
-  const r = await ask($, easyPrompt(id, turnContext(view.turn, view.files, learning), target.sections[id].data, thread), 'text')
+  const r = await ask($, easyPrompt(id, turnContext(view.turn, view.files, learning), target.sections[id].data, thread), 'text', null, target)
   fillThread(target, id, i, { text: r.ok ? r.value.text : '(설명을 만들지 못했습니다: ' + r.error + ')' })
   await saveThreads($, target)
   $.ui.invalidate('ui.render')
@@ -414,7 +452,7 @@ async function askInSection($, id, q) {
   target.threads = { ...target.threads, [id]: [...thread, { type: 'q', q, a: null }] }
   $.ui.invalidate('ui.render')
   const section = { id, json: target.sections[id].data, thread: thread.filter((x) => (x.type === 'easy' ? x.text : x.a)) }
-  const r = await ask($, answerPrompt(q, turnContext(view.turn, view.files, learning), section), 'text')
+  const r = await ask($, answerPrompt(q, turnContext(view.turn, view.files, learning), section), 'text', null, target)
   fillThread(target, id, i, { a: r.ok ? r.value.text : '(답을 만들지 못했습니다: ' + r.error + ')' })
   await saveThreads($, target)
   $.ui.invalidate('ui.render')
@@ -426,7 +464,7 @@ async function askTurn($, q) {
   const i = target.qa.length
   target.qa = [...target.qa, { q, a: null }]
   $.ui.invalidate('ui.render')
-  const r = await ask($, answerPrompt(q, turnContext(view.turn, view.files, learning), null), 'text')
+  const r = await ask($, answerPrompt(q, turnContext(view.turn, view.files, learning), null), 'text', null, target)
   target.qa = target.qa.map((x, j) => (j === i ? { ...x, a: r.ok ? r.value.text : '(답을 만들지 못했습니다: ' + r.error + ')' } : x))
   await saveThreads($, target)
   $.ui.invalidate('ui.render')
@@ -479,7 +517,10 @@ async function openTurn($, rec, at) {
   } catch {}
   const summary = c.session.turns.find((t) => t.turnId === rec.turnId)
   const understood = !!(summary && summary.understood) || (await readUnderstood($, view.dir))
-  ex = { dir: view.dir, sections, open, current: 'summary', threads, qa, quiz, seqLeft: 0, understood }
+  let usage = emptyUsage()
+  const savedUsage = await readOrNull($, view.dir + '/views/usage.json')
+  try { if (savedUsage) usage = { ...usage, ...JSON.parse(savedUsage) } } catch {}
+  ex = { dir: view.dir, sections, open, current: 'summary', threads, qa, quiz, seqLeft: 0, understood, usage }
   mode = 'explain'
   pos = 0
   diffTop = 0
@@ -490,7 +531,7 @@ async function openTurn($, rec, at) {
   }
 }
 
-// ── 작업 목록: 브랜치(워크트리) 작업 찾기 ──────────────────────
+// ── 작업 목록: 이 세션과 지난 세션의 턴 ──────────────────────
 
 async function git($, cwd, args) {
   try {
@@ -501,7 +542,7 @@ async function git($, cwd, args) {
   }
 }
 
-// sh에 인자로 넘겨 실행한다 (경로를 스크립트 글에 끼워 넣지 않는다)
+// sh에 인자로 넘겨 실행한다 (경로를 스크립트 글에 끼워 넣지 않는다). sh가 없으면 빈 글
 async function sh($, script, args) {
   try {
     const r = await $.process.run(['sh', '-c', script, 'sh', ...args], { timeoutMs: 60000 })
@@ -517,216 +558,176 @@ async function transcriptsDir($) {
   return (await $.env.get('HOME')) + '/.claude/projects/' + projectDirName(c.cwd)
 }
 
-// 대화 기록에서 Claude가 다룬 경로들을 모아 git 저장소를 찾는다: [{ key, name, tops: [워크트리 경로] }]
-async function discoverRepos($) {
+
+const day = (iso) => (iso ? iso.slice(5, 16).replace('T', ' ') : '')
+const MAX_SESSIONS = 30
+
+// 지난 세션 목록: 대화 기록 파일들 (최근 것부터). 첫 요청만 가볍게 읽는다
+async function listSessions($) {
+  const c = await ensureCtx($)
+  const dir = await transcriptsDir($)
+  let entries = []
+  try { entries = await $.fs.list(dir) } catch {}
+  const files = entries
+    .filter((x) => x.kind === 'file' && x.name.endsWith('.jsonl') && x.name.slice(0, -6) !== c.sessionId)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, MAX_SESSIONS)
+  const out = []
+  for (const f of files) {
+    // 첫 사용자 요청: 앞쪽 사용자 줄 몇 개 중 실제 요청인 첫 줄 (이미지를 붙인 요청도)
+    const head = (await sh($, 'grep -m 12 -E "\\"type\\":\\"user\\"" "$1" | grep -v "\\"tool_result\\""', [dir + '/' + f.name])).split('\n')
+    let title = ''
+    let at = ''
+    for (const line of head) {
+      let o = null
+      try { o = JSON.parse(line) } catch {}
+      const text = promptText(o)
+      if (text) {
+        title = text.split('\n')[0].slice(0, 60)
+        at = o.timestamp || ''
+        break
+      }
+    }
+    out.push({ id: f.name.slice(0, -6), title: title || '(요청 없음)', at, size: f.size, turns: null, status: 'idle' })
+  }
+  return out
+}
+
+// 그 턴이 다룬 git 저장소: Edit/Write 파일이 있는 곳, Bash 명령의 경로, 세션 디렉토리
+async function turnRepos($, t) {
   const c = await ensureCtx($)
   const home = await $.env.get('HOME')
+  const dirs = new Set([c.cwd])
+  for (const path of Object.keys(t.files)) dirs.add(path.slice(0, path.lastIndexOf('/')) || '/')
+  for (const cmd of t.bashCommands) for (const d of commandDirs(cmd, c.cwd, home)) dirs.add(d)
+  const tops = new Set()
+  for (const d of dirs) {
+    const top = await topOf($, d)
+    if (top) tops.add(top)
+  }
+  return [...tops]
+}
+
+// 그 턴의 시간 범위에 내가(저장소의 user.email) 만든 커밋. 병합 커밋 제외, 오래된 것부터
+async function turnCommits($, top, t) {
+  const email = (await git($, top, ['config', 'user.email'])).out.trim()
+  const args = ['log', '--all', '--no-merges', '--reverse', '--since=' + t.startAt, '--until=' + t.endAt, '--format=%H%x09%cI%x09%s']
+  if (email) args.push('--author=' + email)
+  return parseLog((await git($, top, args)).out)
+}
+
+// 세션 하나의 턴들을 대화 기록에서 복원한다 (펼칠 때). 서브에이전트 기록도 함께
+async function loadSessionTurns($, sessionId) {
   const dir = await transcriptsDir($)
-  const found = await sh($, 'cd "$1" 2>/dev/null || exit 0; grep -rhoE --include="*.jsonl" "\\"(file_path|cwd)\\":\\"[^\\"]+\\"|cd +[^ &;|\\"\\\\]+" . | sort -u | head -5000', [dir])
-  const dirs = [c.root, ...candidateDirs(found.split('\n'), home)]
-  const repos = new Map()
-  const tops = []
-  for (const d of dirs.slice(0, 300)) {
-    if (tops.some((t) => d === t || d.startsWith(t + '/'))) continue
-    // 대화에 나온 원격 서버 경로 등은 확인할 수 없다: 실패하면 그 경로만 건너뛴다
-    let exists = false
-    try { exists = await $.fs.exists(d) } catch {}
-    if (!exists) continue
-    const top = await git($, d, ['rev-parse', '--show-toplevel'])
-    if (!top.ok) continue
-    const root = top.out.trim()
-    tops.push(root)
-    const common = await git($, root, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
-    const key = common.ok ? common.out.trim() : root + '/.git'
-    if (!repos.has(key)) {
-      const name = key.replace(/\/\.git\/?$/, '').split('/').pop()
-      repos.set(key, { key, name, root })
-    }
+  const file = dir + '/' + sessionId + '.jsonl'
+  // 요청·설명·도구 호출 줄, 그리고 편집 결과(고치기 전 파일이 든 줄)만. 아주 긴 줄은 편집 결과일 때만
+  const mainScript = '{ grep -E "\\"type\\":\\"(user|assistant)\\"" "$1" | grep -v "\\"tool_result\\"" | awk \'length($0) < 500000\'; grep -F "\\"originalFile\\"" "$1"; } 2>/dev/null'
+  const main = (await sh($, mainScript, [file])).split('\n')
+  const subScript = 'for f in "$1"/subagents/*.jsonl; do [ -f "$f" ] || continue; echo "@@AGENT $(basename "$f" .jsonl)"; grep -h -E "\\"name\\":\\"(Edit|Write|MultiEdit)\\"|\\"originalFile\\"" "$f"; done 2>/dev/null'
+  const agentLines = []
+  let agent = ''
+  for (const line of (await sh($, subScript, [dir + '/' + sessionId])).split('\n')) {
+    if (line.startsWith('@@AGENT ')) agent = line.slice(8)
+    else if (line) agentLines.push({ agent, line })
   }
-  return [...repos.values()]
+  const home = await $.env.get('HOME')
+  const out = []
+  const turns = turnsFromTranscript(main, agentLines)
+  for (let i = 0; i < turns.length; i++) {
+    const t = turns[i]
+    // Claude 메모리나 임시 작업 폴더를 고친 것은 작업 결과가 아니다
+    for (const path of Object.keys(t.files)) if (!isWorkPath(path, home)) delete t.files[path]
+    // 실제로 바뀐 것이 있는 턴만: Edit/Write 변경, 또는 그 시간대의 커밋
+    let commits = 0
+    if (t.bashCommands.length) for (const top of await turnRepos($, t)) commits += (await turnCommits($, top, t)).length
+    const files = Object.keys(t.files).length
+    if (files || commits) out.push({ ...t, seq: i + 1, files, commits })
+  }
+  return out
 }
 
-// 기준의 기본값: 브랜치를 만든 시점 (reflog). 병합된 작업도, 오래된 로컬 develop도 문제없다
-export const AUTO = 'auto'
-
-// 기준 브랜치: 저장소마다 고른 값, 없으면 자동(브랜치를 만든 시점, 그것도 없으면 설정의 후보 중 가장 가까운 것)
-async function resolveBase($, repo) {
-  const refs = await git($, repo.root, ['for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/remotes/origin'])
-  const names = refs.out.split('\n').map((x) => x.trim()).filter((x) => x && x !== 'origin/HEAD' && x !== 'origin')
-  const has = (b) => names.includes(b)
-  const pick = (b) => (has(b) ? b : has('origin/' + b) ? 'origin/' + b : '')
-  let chosen = ''
-  try { chosen = (await $.store.get('base:' + repo.key)) || '' } catch {}
-  const candidates = baseCandidates(options.base_branches)
-  const base = chosen && (chosen === AUTO || has(chosen)) ? chosen : AUTO
-  // 후보의 로컬과 origin 둘 다: 로컬이 오래됐을 수 있어서 가까운 쪽을 고른다
-  const fallbacks = candidates.flatMap((b) => [b, 'origin/' + b]).filter(has)
-  const preferred = [...candidates, 'develop', 'main', 'master'].flatMap((b) => ['origin/' + b, b]).filter(has)
-  const local = names.filter((n) => !n.startsWith('origin/'))
-  const baseOptions = [...new Set([AUTO, base, ...preferred, ...local])].filter(Boolean).slice(0, 40)
-  return { base, baseOptions, fallbacks }
-}
-
-// 브랜치가 시작된 지점: { point, label }. 고른 기준이 있으면 그것과의 merge-base
-async function branchPoint($, wt, repo) {
-  // 기준 브랜치 자체(develop, main 등)에서 하는 작업은 커밋하지 않은 변경만 본다
-  const mainline = [...baseCandidates(options.base_branches), 'master']
-  if (mainline.includes(wt.branch)) {
-    const head = await git($, wt.path, ['rev-parse', 'HEAD'])
-    return head.ok ? { point: head.out.trim(), label: '마지막 커밋', uncommittedOnly: true } : null
-  }
-  if (repo.base !== AUTO) {
-    const mb = await git($, wt.path, ['merge-base', 'HEAD', repo.base])
-    return mb.ok ? { point: mb.out.trim(), label: repo.base } : null
-  }
-  // reflog의 가장 오래된 항목이 브랜치를 만든 순간이다 ("branch: Created from origin/main")
-  const log = (await git($, wt.path, ['reflog', 'show', '--format=%H %gs', 'refs/heads/' + wt.branch])).out.trim().split('\n').filter(Boolean)
-  const first = log[log.length - 1]
-  if (first) {
-    const m = /^(\S+) branch: Created from (.+)$/.exec(first)
-    if (m) return { point: m[1], label: m[2] + '에서 만든 시점' }
-  }
-  // reflog가 없으면 후보들 중 가장 가까운(앞선 커밋이 가장 적은) 지점
-  let best = null
-  for (const b of repo.fallbacks || []) {
-    const mb = await git($, wt.path, ['merge-base', 'HEAD', b])
-    if (!mb.ok) continue
-    const n = Number((await git($, wt.path, ['rev-list', '--count', mb.out.trim() + '..HEAD'])).out.trim() || 0)
-    if (!best || n < best.n) best = { point: mb.out.trim(), label: b, n }
-  }
-  return best ? { point: best.point, label: best.label } : null
-}
-
-const branchDir = async ($, path, branch) => (await $.env.get('HOME')) + '/.claude/explanations/' + (await repoFolder(path)) + '/branches/' + slug(branch)
-
-// 워크트리 하나의 작업 요약. 시작 지점보다 앞선 커밋도, 고친 파일도 없으면 null
-async function branchItem($, wt, repo) {
-  if (!wt.branch || wt.branch === repo.base || 'origin/' + wt.branch === repo.base) return null
-  const bp = await branchPoint($, wt, repo)
-  if (!bp) return null
-  const mb = bp.point
-  const ahead = Number((await git($, wt.path, ['rev-list', '--count', mb + '..HEAD'])).out.trim() || 0)
-  const stat = parseShortstat((await git($, wt.path, ['diff', '--shortstat', mb])).out)
-  if (!ahead && !stat.files) return null
-  const dirty = !!(await git($, wt.path, ['status', '--porcelain', '--untracked-files=no'])).out.trim()
-  const date = (await git($, wt.path, ['log', '-1', '--format=%cI'])).out.trim()
-  const subjects = (await git($, wt.path, ['log', '--format=%s', mb + '..HEAD'])).out.split('\n').filter(Boolean).reverse()
-  const ticket = ticketKey(wt.branch)
-  // 제목: 티켓 키가 들어간 첫 커밋, 없으면 첫 커밋
-  const subject = bp.uncommittedOnly ? '커밋하지 않은 변경 (' + wt.branch + ')' : subjects.find((x) => ticket && x.includes(ticket)) || subjects[0] || ''
-  const dir = await branchDir($, wt.path, wt.branch)
-  return {
-    id: slug(wt.path),
-    path: wt.path,
-    branch: wt.branch,
-    ticket,
-    mb,
-    baseLabel: bp.label,
-    ahead,
-    files: stat.files,
-    added: stat.added,
-    removed: stat.removed,
-    dirty,
-    date,
-    subject,
-    subjects,
-    dir,
-    understood: await readUnderstood($, dir),
-  }
-}
-
-// 저장소 하나의 브랜치 작업들
-async function repoItems($, repo) {
-  const resolved = { ...repo, ...(await resolveBase($, repo)) }
-  const items = []
-  const wts = parseWorktrees((await git($, repo.root, ['worktree', 'list', '--porcelain'])).out)
-  for (const wt of wts) {
-    const item = await branchItem($, wt, resolved)
-    if (item) items.push(item)
-  }
-  items.sort((a, b) => (a.date < b.date ? 1 : -1))
-  return { ...resolved, items }
-}
-
-// 작업 목록을 처음부터 만든다. 저장소를 하나씩 찾을 때마다 화면에 보인다
-async function loadList($) {
+// 지난 턴 하나를 턴 기록으로 만든다: Edit/Write는 대화 기록에서, Bash로 바꾼 것은 그 턴 시간 범위의 커밋에서
+async function reconstructTurn($, sessionId, t) {
   const c = await ensureCtx($)
-  const turns = []
-  for (const t of c.session.turns) turns.push({ ...t, understood: t.understood || (await readUnderstood($, turnDir(c, t))) })
-  list = { status: 'loading', progress: '대화 기록에서 다룬 저장소를 찾는 중…', turns, repos: [], error: '' }
-  $.ui.invalidate('ui.render')
-  const repos = await discoverRepos($)
-  for (let i = 0; i < repos.length; i++) {
-    list = { ...list, progress: '저장소 ' + (i + 1) + '/' + repos.length + ' 확인 중: ' + repos[i].name }
-    $.ui.invalidate('ui.render')
-    const r = await repoItems($, repos[i])
-    list = { ...list, repos: [...list.repos, r] }
-  }
-  list = { ...list, status: 'done', progress: '' }
-  $.ui.invalidate('ui.render')
-}
-
-// 이 작업을 다룬 대화를 발췌한다: 워크트리 경로·브랜치 이름·티켓 키가 나온 세션들에서, 그 언급 주변만
-async function branchConversation($, item) {
-  const dir = await transcriptsDir($)
-  const keys = [item.path, item.branch, item.ticket].filter(Boolean)
-  const files = (await sh($, 'cd "$1" 2>/dev/null || exit 0; grep -rlF --include="*.jsonl" -e "$2" -e "$3" . | head -6', [dir, item.path, item.branch])).split('\n').filter(Boolean)
-  const parts = []
-  for (const f of files.slice(0, 4)) {
-    // 사용자·Claude 줄만. 아주 긴 줄(도구 입력 등)은 언급이 있을 때만 남긴다
-    const script = 'grep -E "\\"type\\":\\"(user|assistant)\\"" "$1" | grep -v "\\"tool_result\\"" | awk -v a="$2" -v b="$3" -v c="$4" \'length($0) < 20000 || index($0, a) || index($0, b) || (c != "" && index($0, c))\' | tail -c 3000000'
-    const lines = (await sh($, script, [dir + '/' + f.replace(/^\.\//, ''), item.path, item.branch, item.ticket || ''])).split('\n')
-    const text = conversationExcerpt(lines, Math.floor(14000 / Math.min(files.length, 4)), keys)
-    if (text) parts.push('### 세션 ' + f.replace(/^\.\//, '').slice(0, 8) + '\n' + text)
-  }
-  return parts.join('\n\n')
-}
-
-// 브랜치 작업을 턴과 같은 형식으로 가져온다: 갈라진 지점(merge-base)의 내용이 변경 전, 지금 파일이 변경 후
-async function importBranch($, repo, item) {
-  const changes = parseNameStatus((await git($, item.path, ['diff', '--name-status', '-M', item.mb])).out)
-  const untracked = (await git($, item.path, ['ls-files', '--others', '--exclude-standard'])).out.split('\n').filter(Boolean)
-  for (const p of untracked) changes.push({ status: 'A', path: p, from: null })
-  const turn = newTurn('branch-' + slug(item.branch), '', 0)
-  const afters = {}
-  for (const ch of changes.slice(0, 80)) {
-    const abs = item.path + '/' + ch.path
-    let before = null
-    if (ch.status !== 'A') {
-      const show = await git($, item.path, ['show', item.mb + ':' + (ch.from || ch.path)])
-      before = show.ok ? show.out : null
+  // 그 시간 범위에 내가 만든 커밋에서 바뀐 파일
+  const files = {}
+  const commits = []
+  for (const top of await turnRepos($, t)) {
+    for (const cm of await turnCommits($, top, t)) {
+      commits.push({ ...cm, repo: top.split('/').pop() })
+      for (const ch of parseNameStatus((await git($, top, ['show', '--name-status', '-M', '--format=', cm.sha])).out)) {
+        const abs = top + '/' + ch.path
+        if (!files[abs]) {
+          const prev = ch.status === 'A' ? { ok: false } : await git($, top, ['show', cm.sha + '^:' + (ch.from || ch.path)])
+          files[abs] = { before: prev.ok ? prev.out : null, tools: ['git commit'] }
+        }
+        const now = ch.status === 'D' ? { ok: true, out: '' } : await git($, top, ['show', cm.sha + ':' + ch.path])
+        files[abs].after = now.ok ? now.out : null
+      }
     }
-    const after = ch.status === 'D' ? '' : await readSnapshot($, abs)
-    const skipped = after && typeof after === 'object' ? after.skipped : before && looksBinary(before) ? 'binary' : null
-    turn.files[abs] = recordEdit(newFileEntry(abs, ch.path, skipped ? undefined : before, skipped), 'git', null)
-    afters[abs] = typeof after === 'string' ? after : null
   }
-  const request = [
-    '브랜치 ' + item.branch + ' (' + repo.name + ', 기준: ' + item.baseLabel + ')의 작업 전체.',
-    item.subjects.length ? '커밋 (오래된 것부터):\n- ' + item.subjects.join('\n- ') : '아직 커밋하지 않은 변경만 있음',
-    item.dirty ? '커밋하지 않은 변경도 포함.' : '',
-  ].filter(Boolean).join('\n')
+  // Edit/Write: 변경 전은 대화 기록의 것(더 이르다), 변경 후는 커밋된 것이 있으면 그것
+  for (const [abs, f] of Object.entries(t.files)) {
+    if (files[abs]) files[abs] = { ...files[abs], before: f.before, tools: [...new Set([...f.tools, ...files[abs].tools])], agents: f.agents, skipped: f.skipped }
+    else files[abs] = { ...f }
+  }
+
+  const turn = newTurn('h-' + t.id, t.request, 0)
+  const afters = {}
+  for (const [abs, f] of Object.entries(files)) {
+    const skipped = f.skipped || (typeof f.before === 'string' && looksBinary(f.before)) || (typeof f.after === 'string' && looksBinary(f.after)) ? f.skipped || 'binary' : null
+    let entry = newFileEntry(abs, relFor(c, abs), skipped ? undefined : f.before, skipped)
+    for (const tool of f.tools) entry = recordEdit(entry, tool, null)
+    for (const a of f.agents || []) entry = recordEdit(entry, f.tools[0], { agentId: a, type: null })
+    turn.files[abs] = entry
+    afters[abs] = typeof f.after === 'string' ? f.after : null
+  }
+  const commitText = commits.length ? '\n\n## 이 턴에 만든 커밋\n' + commits.map((x) => '- ' + x.repo + ' ' + x.sha.slice(0, 9) + ' ' + x.subject).join('\n') : ''
   const record = turnRecord(turn, afters, {
-    kind: 'branch',
-    sessionId: 'branch',
-    seq: item.ahead,
-    branch: item.branch,
-    base: item.baseLabel,
-    repo: repo.name,
-    worktree: item.path,
-    endedAt: item.date,
-    answer: '',
-    context: await branchConversation($, item),
+    kind: 'past',
+    sessionId,
+    seq: t.seq,
+    answer: t.answer,
+    endedAt: t.endAt,
+    context: t.excerpt + commitText,
+    commits: commits.map((x) => ({ repo: x.repo, sha: x.sha, subject: x.subject })),
   })
-  record.title = (item.ticket ? item.ticket + '  ' : '') + (item.subject || item.branch)
-  record.request = request
+  const dir = c.repoBase + '/' + sessionId + '/turns/' + pad(t.seq) + '-h-' + t.id
   for (const x of Object.values(turn.files)) {
     if (x.skipped) continue
-    if (typeof x.before === 'string') await $.fs.write(item.dir + '/before/' + x.rel, x.before)
-    if (typeof afters[x.abs] === 'string') await $.fs.write(item.dir + '/after/' + x.rel, afters[x.abs])
+    if (typeof x.before === 'string') await $.fs.write(dir + '/before/' + x.rel, x.before)
+    if (typeof afters[x.abs] === 'string') await $.fs.write(dir + '/after/' + x.rel, afters[x.abs])
   }
-  await saveJson($, item.dir + '/turn.json', record)
-  return record
+  await saveJson($, dir + '/turn.json', record)
+  return { record, dir }
+}
+
+// 작업 목록을 만든다: 이 세션의 턴(기록) + 지난 세션(펼치면 턴을 복원)
+async function loadList($) {
+  const c = await ensureCtx($)
+  if (!repoUsage) {
+    const saved = await readOrNull($, c.repoBase + '/usage.json')
+    try { repoUsage = saved ? { ...emptyUsage(), ...JSON.parse(saved) } : emptyUsage() } catch { repoUsage = emptyUsage() }
+  }
+  const turns = []
+  for (const t of c.session.turns) turns.push({ ...t, understood: t.understood || (await readUnderstood($, turnDir(c, t))) })
+  list = { status: 'loading', progress: '지난 세션을 찾는 중…', turns, sessions: [], usage: repoUsage, error: '' }
+  $.ui.invalidate('ui.render')
+  list = { ...list, sessions: await listSessions($), status: 'done', progress: '' }
+  $.ui.invalidate('ui.render')
+}
+
+// 지난 세션 하나를 펼친다: 턴을 복원하고, 이미 해설한 턴이면 이해 여부를 표시
+async function expandSession($, sessionId) {
+  const c = await ensureCtx($)
+  const set = (patch) => {
+    list = { ...list, sessions: list.sessions.map((x) => (x.id === sessionId ? { ...x, ...patch } : x)) }
+    $.ui.invalidate('ui.render')
+  }
+  set({ status: 'loading' })
+  const turns = await loadSessionTurns($, sessionId)
+  for (const t of turns) t.understood = await readUnderstood($, c.repoBase + '/' + sessionId + '/turns/' + pad(t.seq) + '-h-' + t.id)
+  set({ status: 'open', turns })
 }
 
 // ── 훅 ─────────────────────────────────────────────────────
@@ -735,7 +736,6 @@ export function register(on, opts) {
   options = opts || {}
   applyTheme(options.theme)
   setLanguage(options.language)
-  setTicketPattern(options.ticket_pattern)
   on('session.start', async ($, e, next) => {
     try {
       await $.command.register({
@@ -752,7 +752,7 @@ export function register(on, opts) {
       await $.command.register({
         name: 'explain-check',
         description: '(개발용) 마지막 변경 턴의 해설 섹션 하나를 실제로 만들어 JSON으로 출력',
-        argumentHint: '[섹션] [티켓 키나 브랜치]',
+        argumentHint: '[섹션] [세션 id 앞부분/턴 번호]',
         immediate: true,
       })
     } catch (err) {
@@ -894,15 +894,15 @@ export function register(on, opts) {
         await loadList($)
         const lines = []
         for (const t of list.turns) lines.push('#' + t.seq + '  ' + t.title + '  파일 ' + t.files + '  +' + t.added + ' −' + t.removed)
-        for (const r of list.repos) {
-          lines.push('', r.name + '  (기준: ' + (r.base === AUTO ? '자동, 브랜치를 만든 시점' : r.base) + ')')
-          for (const x of r.items) {
-            lines.push('  ' + (x.ticket ? x.ticket + '  ' : '') + (x.subject || x.branch) + '  [' + x.branch + ', ' + x.baseLabel + ']')
-            lines.push('    커밋 ' + x.ahead + '  파일 ' + x.files + '  +' + x.added + ' −' + x.removed + (x.dirty ? '  커밋 안 한 변경 있음' : '') + '  ' + x.date.slice(0, 10) + (x.understood ? '  ✓ 이해함' : ''))
-          }
-          if (!r.items.length) lines.push('  (진행 중인 브랜치 작업 없음)')
+        for (const ses of list.sessions) {
+          const turns = await loadSessionTurns($, ses.id)
+          if (!turns.length) continue
+          lines.push('', day(ses.at) + '  ' + ses.title + '  [' + ses.id.slice(0, 8) + ']')
+          for (const t of turns) lines.push('  #' + t.seq + '  ' + t.request.split('\n')[0].slice(0, 60) + '  (Edit/Write 파일 ' + t.files + ', 커밋 ' + t.commits + ')')
         }
-        return { text: lines.length ? lines.join('\n') : '가져올 작업이 없습니다.' }
+        const u = list.usage
+        lines.push('', '해설에 쓴 토큰 (이 저장소 누적): 호출 ' + u.calls + '회, 입력 ' + u.input + ' (캐시 읽기 ' + u.cacheRead + ', 캐시 쓰기 ' + u.cacheWrite + '), 출력 ' + u.output)
+        return { text: lines.join('\n') }
       }
       mode = 'list'
       loadList($).catch((err) => $.ui.log('목록을 만들지 못함: ' + err))
@@ -941,21 +941,27 @@ export function register(on, opts) {
     const [id = 'summary', target] = (e.args || '').trim().split(/\s+/)
     if (!SECTION_TITLE[id]) return { text: '섹션 이름: ' + SECTIONS.map((s) => s.id).join(', ') }
     if (target) {
-      // 브랜치 작업: 티켓 키나 브랜치 이름으로 찾아 가져온다
+      // 지난 세션의 턴: "<세션 id 앞부분>/<턴 번호>"
+      const [prefix, num] = target.split('/')
       await loadList($)
-      let hit = null
-      for (const r of list.repos) for (const x of r.items) if (!hit && (x.ticket === target || x.branch === target || x.path.endsWith('/' + target))) hit = { r, x }
-      if (!hit) return { text: '작업을 찾지 못했습니다: ' + target }
-      const rec = await importBranch($, hit.r, hit.x)
-      view = await loadView($, rec, hit.x.dir)
+      const ses = list.sessions.find((x) => x.id.startsWith(prefix))
+      if (!ses) return { text: '세션을 찾지 못했습니다: ' + prefix }
+      const turns = await loadSessionTurns($, ses.id)
+      const t = num ? turns.find((x) => String(x.seq) === num) : turns[turns.length - 1]
+      if (!t) return { text: '변경이 있는 턴을 찾지 못했습니다. 있는 턴: ' + turns.map((x) => x.seq).join(', ') }
+      const { record, dir } = await reconstructTurn($, ses.id, t)
+      view = await loadView($, record, dir)
     } else {
       const rec = await latestRecord($)
       if (!rec) return { text: NOTHING_YET }
       view = await loadView($, rec)
     }
     const context = turnContext(view.turn, view.files, learning)
-    const r = await ask($, sectionPrompt(id, context), id, context)
-    return { text: r.ok ? JSON.stringify(r.value, null, 2) : '실패: ' + r.error }
+    const used = { dir: view.dir, usage: emptyUsage() }
+    const r = await ask($, sectionPrompt(id, context), id, context, used)
+    const u = used.usage
+    const usageLine = '\n토큰: 호출 ' + u.calls + '회, 입력 ' + u.input + ' (캐시 읽기 ' + u.cacheRead + ', 캐시 쓰기 ' + u.cacheWrite + '), 출력 ' + u.output
+    return { text: (r.ok ? JSON.stringify(r.value, null, 2) : '실패: ' + r.error) + usageLine }
   })
 
   // diff 창에서는 휠과 스크롤 키로 창 전체가 아니라 코드 영역만 움직인다
@@ -992,24 +998,31 @@ export function register(on, opts) {
           $.ui.invalidate('ui.render')
           $.ui.scroll({ in: PANE, to: 'start' }).catch(() => {})
         },
-        openBranch: async (repo, item) => {
-          list = { ...list, progress: item.branch + ' 가져오는 중…', status: 'loading' }
+        toggleSession: (ses) => {
+          if (ses.status === 'open') {
+            list = { ...list, sessions: list.sessions.map((x) => (x.id === ses.id ? { ...x, status: 'idle' } : x)) }
+            $.ui.invalidate('ui.render')
+            return
+          }
+          if (ses.turns) {
+            list = { ...list, sessions: list.sessions.map((x) => (x.id === ses.id ? { ...x, status: 'open' } : x)) }
+            $.ui.invalidate('ui.render')
+            return
+          }
+          expandSession($, ses.id).catch(failedList)
+        },
+        openPast: async (ses, t) => {
+          list = { ...list, progress: '#' + t.seq + ' 턴을 대화 기록과 git에서 복원하는 중…', status: 'loading' }
           $.ui.invalidate('ui.render')
           try {
-            const rec = await importBranch($, repo, item)
-            await openTurn($, rec, item.dir)
+            const { record, dir } = await reconstructTurn($, ses.id, t)
+            await openTurn($, record, dir)
           } catch (err) {
-            list = { ...list, error: '가져오지 못했습니다: ' + err }
+            list = { ...list, error: '복원하지 못했습니다: ' + err }
           }
           list = { ...list, status: 'done', progress: '' }
           $.ui.invalidate('ui.render')
           $.ui.scroll({ in: PANE, to: 'start' }).catch(() => {})
-        },
-        setBase: async (repo, value) => {
-          await $.store.set('base:' + repo.key, value).catch(() => {})
-          const updated = await repoItems($, repo)
-          list = { ...list, repos: list.repos.map((r) => (r.key === repo.key ? updated : r)) }
-          $.ui.invalidate('ui.render')
         },
       })
     }

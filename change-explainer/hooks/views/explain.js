@@ -12,6 +12,7 @@
 import { SECTIONS } from '../generate.js'
 import { C, btn, buttonRow, link, linkRow, rich, rule } from './common.js'
 import { flowView, seqMaxLeft, seqView } from './diagrams.js'
+import { usageText } from './list.js'
 
 // 이 회차부터는 더 설명하기보다 어디가 막히는지 묻는다
 export const EASY_ASK_AFTER = 3
@@ -304,6 +305,7 @@ export function explainView(el, cols, st, on) {
         ['  ·  ' + hhmm + '  ·  ', C.dim],
         st.understood ? ['✓ 이해함 (퀴즈 통과)', C.green, true] : ['○ 아직 확인 안 함', C.faint],
       ], { wrap: 'truncate-end' }),
+      rich(el, [['해설에 쓴 토큰  ', C.faint], [usageText(st.usage), C.dim]], { wrap: 'truncate-end' }),
       el.Text({ children: [' '] }),
       rich(el, [['요청 ', C.faint], [t.request, C.dim]]),
       el.Box({

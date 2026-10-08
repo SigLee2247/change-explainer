@@ -25,14 +25,16 @@ When Claude edits code, the result stays but the reasoning disappears into the c
 
 - **Wait, what?** If a section does not land, press it. Each press explains again in a different way (analogy, premises one by one, numbers, execution order), and you can ask a question about that section.
 - **IntelliJ-style diff** (`d`): side by side on wide panes, unified on narrow ones, changed words highlighted, only the code area scrolls.
-- **Past work per branch** (`/explain list`): finds the repositories your project's conversations touched, lists every worktree branch with work on it (ticket key, commits, files), and explains a branch from where it was created, with the conversation that produced it as context.
+- **Past sessions** (`/explain list`): Claude Code keeps every conversation of a project. The list shows your past sessions; open one to see its turns that changed something, and open a turn to explain it. Edit/Write changes come from the conversation record (exact), Bash changes from the commits you made in that turn's time window. Nothing to configure: no repository paths, no base branches.
+- **Token usage.** Every explanation records the tokens it used (input, cache reads, output). The pane shows the turn's total; the list shows the total for the repository.
 - **Remembers what you learned.** Terms you know and sections you got stuck on are saved per repository and shape later explanations.
 
 ## Requirements
 
 - Claude Code **2.1.287 or later** (tested on 2.1.293). Check with `claude --version`.
 - A terminal session (the CLI) or the Desktop app's Code tab. In `claude -p` and the VS Code chat panel, `/explain` answers with text instead of a pane.
-- `git`. Finding past work from conversations uses `sh`, `grep` and `awk` (macOS and Linux). On Windows that part is skipped.
+- `git` is optional. Without it, Edit/Write changes are still recorded and explained; only changes made through Bash are missed. You do not need to manage or configure anything in git: the mod only reads it.
+- Reading past sessions uses `sh`, `grep` and `awk` (macOS and Linux). On Windows the past-session list stays empty; live recording works.
 
 ## Install
 
@@ -60,9 +62,9 @@ After installing, run `/plugin` and check that `change-explainer` is listed as a
 2. When the turn ends, type `/explain`.
 3. Press `1`–`9` to open sections, `d` for the diff, `t` for the work list, `Esc` to close.
 
-`/explain list` opens the work list: this session's turns and past branch work. If the session has no recorded change yet, `/explain` opens the list too.
+`/explain list` opens the work list: this session's turns and your past sessions. If the session has no recorded change yet, `/explain` opens the list too.
 
-Only changes made after the mod is loaded are recorded per turn. Earlier work is available per branch in the list.
+Live recording starts when the mod is loaded. Work from before that is in the list under past sessions, as long as Claude Code still keeps the conversation (30 days by default).
 
 ## Settings
 
@@ -72,19 +74,19 @@ Set them with `/plugin configure change-explainer@change-explainer`, or pass `--
 | :- | :- | :- |
 | `language` | `ko` | Language the explanations are written in: `ko` or `en`. The pane's own labels are Korean for now. |
 | `theme` | `dark` | `light` for light terminal themes (diff colors and text). |
-| `model` | `session` | Model for explaining past work (`haiku`, `sonnet`, `opus` or a model id). `session` uses the session's model. Turns of the current session always fork the current conversation. |
-| `base_branches` | `develop,main` | Fallback bases for branch work when the branch's creation point is not in the reflog. Each repository can pick its own base in the list. |
-| `ticket_pattern` | `[A-Z][A-Z0-9]+-\d+` | Regular expression for ticket keys in branch names (Jira style by default; for example `#\d+` for GitHub issues). |
+| `model` | `session` | Model for explaining past sessions (`haiku`, `sonnet`, `opus` or a model id). `session` uses the session's model. Turns of the current session always fork the current conversation. |
 
 ## Where data goes, and what it costs
 
 - Everything is stored locally under `~/.claude/explanations/`: per turn, the before/after snapshots of changed files, the generated sections, your questions and answers, and quiz results. Delete the folder to remove it all.
 - The mod runs with your permissions inside Claude Code. It reads your conversation files under `~/.claude/projects/`, runs `git` in the repositories you work in, and calls the model with your plan or API key. It sends nothing anywhere else. Review what it does with `claude plugin validate ./change-explainer`.
-- Model calls happen only when you open a section, press Wait, what?, ask a question or take the quiz. The summary is generated when the pane opens. Generated sections are cached and not regenerated unless you press `r`. Current-session explanations fork the conversation, so most of the prompt comes from the prompt cache.
+- Model calls happen only when you open a section, press Wait, what? or ask a question. The summary is generated when the pane opens. Generated sections are cached and not regenerated unless you press `r`. Current-session explanations fork the conversation, so most of the prompt comes from the prompt cache.
+- Every call's token usage is shown in the pane (per turn) and in the list (per repository), and saved in `usage.json`. As a reference, a summary of a past turn with 11 changed files used about 13k input and 4k output tokens on the session model; set `model` to `sonnet` or `haiku` to make past-session explanations cheaper.
 
 ## Limitations
 
 - Bash changes are found through git: files outside a git repository, and changes whose paths do not appear in the command (a script that moves to another repository), are missed. Switching branches during a turn shows the branch difference as changes.
+- For past sessions, Bash changes are recovered only if they were committed; a commit belongs to the turn in which it was made.
 - The "why" is reconstructed from the conversation, not Claude's internal reasoning. Statements without support in the conversation are marked as guesses.
 - The pane labels are Korean. Explanations follow the `language` setting.
 
@@ -92,12 +94,12 @@ Set them with `/plugin configure change-explainer@change-explainer`, or pass `--
 
 ```bash
 claude --plugin-dir ./change-explainer          # load with hot reload
-cd change-explainer && claude plugin test       # 50 tests, no session or network needed
+cd change-explainer && claude plugin test       # 48 tests, no session or network needed
 claude plugin validate ./change-explainer --strict
 claude plugin validate .                        # the marketplace file
 ```
 
-- `CHANGE_EXPLAINER_DEV=1` adds `/explain-check <section> [ticket or branch]`, which generates one section with the real model and prints the JSON.
+- `CHANGE_EXPLAINER_DEV=1` adds `/explain-check <section> [session-id-prefix/turn]`, which generates one section with the real model and prints the JSON and the tokens used.
 - `SPEC.md` (Korean) records the design and the decisions behind it.
 - `samples/explain-preview` is a fixed-data mod for checking the pane's design; `samples/try-change-explainer.sh` builds a demo repository and starts Claude Code with the mod.
 
@@ -123,7 +125,7 @@ claude plugin install change-explainer@change-explainer
   - `d`: diff
   - `t`: 작업 목록
   - `Esc`: 닫기
-- `/explain list`: 이 세션의 턴과, 브랜치(티켓) 단위의 지난 작업 목록. 고르면 해설 창이 열립니다.
+- `/explain list`: 이 세션의 턴과 지난 세션 목록. 지난 세션을 펼치면 실제로 바뀐 것이 있는 턴이 나오고, 고르면 해설 창이 열립니다. 저장소 경로나 기준 브랜치 같은 설정은 필요 없습니다.
 - 막히면 `Wait, what?`: 누를 때마다 다른 방식으로 다시 설명하고, 그 부분만 따로 질문할 수 있습니다.
 - 퀴즈를 다 맞히면 그 턴이 "이해함"으로 남습니다.
 
@@ -131,9 +133,7 @@ claude plugin install change-explainer@change-explainer
 
 - `language`: 해설 언어 (ko/en)
 - `theme`: 터미널 테마 (dark/light)
-- `model`: 지난 작업 해설 모델
-- `base_branches`: 기준 브랜치 후보
-- `ticket_pattern`: 티켓 키 형식
+- `model`: 지난 세션 해설 모델 (비용을 줄이려면 sonnet이나 haiku)
 
 자세한 내용은 위 영어 표를 참고하세요.
 
@@ -141,3 +141,5 @@ claude plugin install change-explainer@change-explainer
 
 - 모든 기록은 `~/.claude/explanations/`에만 저장됩니다.
 - 모델은 섹션을 펼치거나 질문할 때만 호출하고, 만든 결과는 캐시합니다.
+- 해설에 쓴 토큰은 해설 창(턴별)과 작업 목록(저장소 누적)에 보입니다.
+- git은 필수가 아닙니다. 없으면 Bash로 바꾼 파일만 놓치고, Edit/Write 변경은 그대로 해설합니다.

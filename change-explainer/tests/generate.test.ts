@@ -1,6 +1,5 @@
 import { expect, test } from 'claude-code/testing'
 import { parseAt, sectionPrompt, setLanguage, validate } from '../hooks/generate.js'
-import { setTicketPattern, ticketKey } from '../hooks/branches.js'
 
 const ctx = { text: '## 해설할 턴', hunkCount: 2 }
 
@@ -9,15 +8,6 @@ test('설정 language: 해설 언어 지시가 바뀐다', () => {
   expect(sectionPrompt('summary', ctx)).toMatch(/Write every text value in English/)
   setLanguage('ko')
   expect(sectionPrompt('summary', ctx)).toMatch(/한국어로, 짧고 쉬운 문장으로/)
-})
-
-test('설정 ticket_pattern: GitHub 이슈 번호 같은 다른 형식', () => {
-  setTicketPattern('#\\d+')
-  expect(ticketKey('fix/#123-login')).toBe('#123')
-  setTicketPattern('not(valid')
-  expect(ticketKey('fix/SHOP-1-x')).toBe('SHOP-1')
-  setTicketPattern('')
-  expect(ticketKey('feature/ABC-42-y')).toBe('ABC-42')
 })
 
 test('코드 위치 해석', () => {
