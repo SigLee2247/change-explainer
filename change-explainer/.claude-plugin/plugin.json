@@ -1,6 +1,6 @@
 {
   "name": "change-explainer",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Explains what Claude changed in each turn, and why: summary, code walkthrough, flow and sequence diagrams, IntelliJ-style diff, quiz. Also explains past sessions. 변경 해설 mod.",
   "author": {
     "name": "siglee"

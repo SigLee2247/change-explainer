@@ -77,6 +77,7 @@ const NOTHING_YET = [
   '이 세션에서 아직 기록된 변경이 없습니다.',
   'Claude에게 파일을 고치게 하고, 그 턴이 끝난 뒤 /explain 을 입력하세요.',
   '(이 mod를 불러오기 전에 한 변경은 기록되지 않습니다)',
+  '지난 작업은 /explain-list 로 볼 수 있습니다.',
 ].join('\n')
 
 // 이 mod는 관찰만 하므로, 훅이 실패해도 원래 동작은 그대로 진행한다.
@@ -771,6 +772,30 @@ async function loadList($) {
   $.ui.invalidate('ui.render')
 }
 
+// 작업 목록 (/explain-list, /explain list). 창을 그릴 수 없으면(claude -p) 글로
+async function showList($) {
+  const hasSurface = (await $.session.surfaces()).length > 0
+  // 화면이 없으면 목록을 글로 (claude -p에서 확인용)
+  if (!hasSurface) {
+    await loadList($)
+    const lines = []
+    for (const t of list.turns) lines.push('#' + t.seq + '  ' + t.title + '  파일 ' + t.files + '  +' + t.added + ' −' + t.removed)
+    if (list.past.length) lines.push('', '지난 작업')
+    for (const t of list.past) {
+      lines.push('', t.at + '  ' + t.request.slice(0, 60) + '  [' + t.sessionId.slice(0, 8) + '/' + t.seq + ']')
+      for (const subject of t.subjects) lines.push('    커밋: ' + subject)
+      if (t.fileNames.length) lines.push('    파일: ' + t.fileNames.join(', '))
+    }
+    const u = list.usage
+    lines.push('', '해설에 쓴 토큰 (이 저장소 누적): 호출 ' + u.calls + '회, 입력 ' + u.input + ' (캐시 읽기 ' + u.cacheRead + ', 캐시 쓰기 ' + u.cacheWrite + '), 출력 ' + u.output)
+    return { text: lines.join('\n') }
+  }
+  mode = 'list'
+  loadList($).catch((err) => $.ui.log('목록을 만들지 못함: ' + err))
+  const opened = await $.ui.open({ id: PANE, title: '변경 해설', focus: true, closeOnEscape: true, columns: WANT_COLUMNS })
+  return opened && opened.isPlaced ? {} : { text: '창을 열지 못했습니다. 터미널을 넓혀 주세요.' }
+}
+
 // ── 훅 ─────────────────────────────────────────────────────
 
 export function register(on, opts) {
@@ -781,8 +806,13 @@ export function register(on, opts) {
     try {
       await $.command.register({
         name: 'explain',
-        description: 'Claude가 바꾼 내용 해설 (마지막 변경 턴). list: 이 세션의 턴과 브랜치 작업 목록',
+        description: '이 세션에서 Claude가 마지막으로 바꾼 내용 해설',
         argumentHint: '[list]',
+        immediate: true,
+      })
+      await $.command.register({
+        name: 'explain-list',
+        description: '작업 목록: 이 세션의 턴과 지난 작업 (고르면 해설)',
         immediate: true,
       })
     } catch (err) {
@@ -920,43 +950,16 @@ export function register(on, opts) {
     return next(e)
   }).catch(passThrough)
 
+  on('command.run', { command: 'explain-list' }, async ($) => showList($))
+
   // /explain: 마지막 변경 턴의 diff 창을 연다. 창을 그릴 수 없는 곳(claude -p 등)에서는 텍스트로 답한다
   on('command.run', { command: 'explain' }, async ($, e) => {
     const arg = (e.args || '').trim()
-    const hasSurface = (await $.session.surfaces()).length > 0
-    const openPane = async () => {
-      const opened = await $.ui.open({ id: PANE, title: '변경 해설', focus: true, closeOnEscape: true, columns: WANT_COLUMNS })
-      return opened && opened.isPlaced
-    }
-    // /explain list: 이 세션의 턴과 브랜치 작업 목록
-    if (/^(list|목록|branches|history)$/.test(arg)) {
-      // 화면이 없으면 목록을 글로 (claude -p에서 확인용)
-      if (!hasSurface) {
-        await loadList($)
-        const lines = []
-        for (const t of list.turns) lines.push('#' + t.seq + '  ' + t.title + '  파일 ' + t.files + '  +' + t.added + ' −' + t.removed)
-        if (list.past.length) lines.push('', '지난 작업')
-        for (const t of list.past) {
-          lines.push('', t.at + '  ' + t.request.slice(0, 60) + '  [' + t.sessionId.slice(0, 8) + '/' + t.seq + ']')
-          for (const subject of t.subjects) lines.push('    커밋: ' + subject)
-          if (t.fileNames.length) lines.push('    파일: ' + t.fileNames.join(', '))
-        }
-        const u = list.usage
-        lines.push('', '해설에 쓴 토큰 (이 저장소 누적): 호출 ' + u.calls + '회, 입력 ' + u.input + ' (캐시 읽기 ' + u.cacheRead + ', 캐시 쓰기 ' + u.cacheWrite + '), 출력 ' + u.output)
-        return { text: lines.join('\n') }
-      }
-      mode = 'list'
-      loadList($).catch((err) => $.ui.log('목록을 만들지 못함: ' + err))
-      return (await openPane()) ? {} : { text: '창을 열지 못했습니다. 터미널을 넓혀 주세요.' }
-    }
+    // /explain list: /explain-list 와 같다
+    if (/^(list|목록|branches|history)$/.test(arg)) return showList($)
+    // 기본은 지금 세션: 기록이 없으면 안내만 (지난 작업은 /explain-list)
     const rec = await latestRecord($)
-    if (!rec) {
-      // 이 세션에 기록이 없으면 지난 작업 목록을 보여 준다
-      if (!hasSurface) return { text: NOTHING_YET }
-      mode = 'list'
-      loadList($).catch((err) => $.ui.log('목록을 만들지 못함: ' + err))
-      return (await openPane()) ? {} : { text: NOTHING_YET }
-    }
+    if (!rec) return { text: NOTHING_YET }
     const textAnswer = () => {
       const changed = rec.files.filter((f) => f.changed)
       return [

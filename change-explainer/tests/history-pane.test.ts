@@ -86,7 +86,7 @@ const flush = () => new Promise((r) => setTimeout(r, 200))
 
 test('지난 작업은 바뀐 턴 한 줄씩, 커밋 메시지를 제목으로 보여 준다. 지금 세션과 바꾼 것 없는 세션은 빠진다', async ($, on) => {
   const { prompts, reads } = setup(on)
-  await $.command.run({ command: 'explain', args: 'list' })
+  await $.command.run({ command: 'explain-list', args: '' })
   await flush()
   const ui = await $.ui.mount(pane())
   expect(await ui.find({ key: 'past-u1' })).toMatchObject({ props: { label: 'fix(SHOP-1): 상한 200' } })
@@ -124,4 +124,10 @@ test('지난 턴을 열면 그 시간대의 내 커밋에서 변경을 복원하
   expect(await ui.find({ type: 'Text', text: /호출 1회 · 입력 1\.2k \(캐시 읽기 0\) · 출력 300/ })).toBeDefined()
   const repoUsage = [...writes.keys()].find((k) => k.endsWith('/usage.json') && !k.includes('/views/'))!
   expect(JSON.parse(writes.get(repoUsage)!)).toEqual({ calls: 1, input: 1200, output: 300, cacheRead: 0, cacheWrite: 0 })
+})
+
+test('/explain은 지금 세션만: 기록이 없으면 목록을 열지 않고 /explain-list를 안내한다', async ($, on) => {
+  setup(on)
+  const out = await $.command.run({ command: 'explain', args: '' })
+  expect(out.text).toMatch(/아직 기록된 변경이 없습니다[\s\S]*\/explain-list/)
 })

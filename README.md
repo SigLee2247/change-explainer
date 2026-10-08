@@ -25,7 +25,7 @@ When Claude edits code, the result stays but the reasoning disappears into the c
 
 - **Wait, what?** If a section does not land, press it. Each press explains again in a different way (analogy, premises one by one, numbers, execution order), and you can ask a question about that section.
 - **IntelliJ-style diff** (`d`): side by side on wide panes, unified on narrow ones, changed words highlighted, only the code area scrolls.
-- **Past work** (`/explain list`): Claude Code keeps every conversation of a project. The list shows every past turn that changed something, newest first, one line each, titled by its commit message (or the files it changed). Open one to explain it. Sessions are read in the background and indexed, so the list opens at once the next time. Edit/Write changes come from the conversation record (exact), Bash changes from the commits you made in that turn's time window. Nothing to configure: no repository paths, no base branches.
+- **Past work** (`/explain-list`): Claude Code keeps every conversation of a project. The list shows every past turn that changed something, newest first, one line each, titled by its commit message (or the files it changed). Open one to explain it. Sessions are read in the background and indexed, so the list opens at once the next time. Edit/Write changes come from the conversation record (exact), Bash changes from the commits you made in that turn's time window. Nothing to configure: no repository paths, no base branches.
 - **Token usage.** Every explanation records the tokens it used (input, cache reads, output). The pane shows the turn's total; the list shows the total for the repository.
 - **Remembers what you learned.** Terms you know and sections you got stuck on are saved per repository and shape later explanations.
 
@@ -62,9 +62,9 @@ After installing, run `/plugin` and check that `change-explainer` is listed as a
 2. When the turn ends, type `/explain`.
 3. Press `1`–`9` to open sections, `d` for the diff, `t` for the work list, `Esc` to close.
 
-`/explain list` opens the work list: this session's turns and your past work. If the session has no recorded change yet, `/explain` opens the list too.
+`/explain` always explains the current session. `/explain-list` opens the work list: this session's turns and your past work. Inside the pane, `t` opens the list too.
 
-Live recording starts when the mod is loaded. Work from before that is in the list under past sessions, as long as Claude Code still keeps the conversation (30 days by default).
+Live recording starts when the mod is loaded. Work from before that is in the list under past work, as long as Claude Code still keeps the conversation (30 days by default).
 
 ## Settings
 
@@ -94,7 +94,7 @@ Set them with `/plugin configure change-explainer@change-explainer`, or pass `--
 
 ```bash
 claude --plugin-dir ./change-explainer          # load with hot reload
-cd change-explainer && claude plugin test       # 49 tests, no session or network needed
+cd change-explainer && claude plugin test       # 50 tests, no session or network needed
 claude plugin validate ./change-explainer --strict
 claude plugin validate .                        # the marketplace file
 ```
@@ -129,7 +129,8 @@ claude plugin install change-explainer@change-explainer
   - `d`: diff
   - `t`: 작업 목록
   - `Esc`: 닫기
-- `/explain list`: 이 세션의 턴과 지난 작업 목록. 지난 대화에서 실제로 무언가 바꾼 턴이 최근 것부터 한 줄씩(커밋 메시지나 바꾼 파일 이름으로) 나오고, 고르면 해설 창이 열립니다. 저장소 경로나 기준 브랜치 같은 설정은 필요 없습니다.
+- `/explain`은 항상 지금 세션을 해설합니다.
+- `/explain-list`: 이 세션의 턴과 지난 작업 목록 (해설 창에서는 `t`). 지난 대화에서 실제로 무언가 바꾼 턴이 최근 것부터 한 줄씩(커밋 메시지나 바꾼 파일 이름으로) 나오고, 고르면 해설 창이 열립니다. 저장소 경로나 기준 브랜치 같은 설정은 필요 없습니다.
 - 막히면 `Wait, what?`: 누를 때마다 다른 방식으로 다시 설명하고, 그 부분만 따로 질문할 수 있습니다.
 - 퀴즈를 다 맞히면 그 턴이 "이해함"으로 남습니다.
 
