@@ -2,5 +2,15 @@
   "name": "change-explainer",
   "version": "0.1.0",
   "description": "Claude가 턴마다 바꾼 코드를 기록하고, 무엇을 왜 어떻게 바꿨는지 터미널 창에서 해설합니다",
-  "author": { "name": "siglee" }
+  "author": {
+    "name": "siglee"
+  },
+  "userConfig": {
+    "base_branches": {
+      "type": "string",
+      "title": "기준 브랜치 후보",
+      "description": "브랜치 작업을 비교할 기준 브랜치. 쉼표로 여러 개를 적으면 저장소에 있는 첫 번째를 씁니다. 저장소마다 작업 목록에서 따로 바꿀 수 있습니다.",
+      "default": "develop,main"
+    }
+  }
 }

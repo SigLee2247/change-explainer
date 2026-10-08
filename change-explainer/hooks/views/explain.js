@@ -326,6 +326,7 @@ export function explainView(el, cols, st, on) {
         btn(el, { key: 'all', hotkey: 'a', label: allOpen ? '모두 접기' : '모두 펼치기', onPress: () => on.toggleAll(!allOpen) }),
         btn(el, { key: 'regen', hotkey: 'r', label: '다시 만들기', dim: st.sections[st.current].status === 'loading', onPress: on.regen }),
         btn(el, { key: 'go-quiz', hotkey: 'q', label: '퀴즈', onPress: on.goQuiz }),
+        ...(on.list ? [btn(el, { key: 'go-list', hotkey: 't', label: '목록', onPress: on.list })] : []),
       ])] }),
       el.Box({
         marginTop: 1,

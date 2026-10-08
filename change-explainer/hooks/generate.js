@@ -54,14 +54,16 @@ export function turnContext(turn, files, learning) {
     '## 해설할 턴',
     '사용자 요청: ' + turn.request,
     '',
-    'Claude의 최종 답변:',
-    clip(turn.answer, MAX_ANSWER_CHARS),
+    ...(turn.answer ? ['Claude의 최종 답변:', clip(turn.answer, MAX_ANSWER_CHARS)] : []),
     '',
     '## 이 턴의 diff',
     '형식: "- 줄번호"는 변경 전 파일의 줄, "+ 줄번호"는 변경 후 파일의 줄, 앞이 공백인 줄은 같은 줄(변경 후 줄번호).',
     '"@@ 변경 N"은 변경 블록 번호.',
     d.text,
   ]
+  if (turn.context) {
+    lines.push('', '## 이 작업을 하던 대화 (발췌, 오래된 것부터)', '이 대화에 근거해 "왜"를 설명해. 대화에 없는 이유는 (추정)으로 표시해.', clip(turn.context, 16000))
+  }
   if (learning && learning.known && learning.known.length) {
     lines.push('', '## 사용자가 이미 아는 용어 (짧게만 언급하고 다시 정의하지 말 것)', learning.known.join(', '))
   }

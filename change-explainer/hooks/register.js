@@ -1,6 +1,6 @@
 // change-explainer: Claude가 턴마다 바꾼 파일을 기록하고, 원할 때 해설한다.
 //
-// 1단계: 변경 수집과 저장 / 2단계: diff 창 / 3단계: 해설 생성과 해설 창
+// 1단계: 변경 수집과 저장 / 2단계: diff 창 / 3단계: 해설 생성과 해설 창 / 4단계: 작업 목록(이 세션의 턴, 브랜치 작업)
 // - 턴에서 파일을 처음 건드리기 직전의 내용(변경 전)과 턴이 끝난 뒤의 내용(변경 후)을 남긴다
 // - 서브에이전트의 수정은 그 서브에이전트를 실행한 메인 턴에 붙인다
 // - 도구 호출은 관찰만 한다. 막거나 바꾸지 않고 next(e)의 결과를 그대로 돌려준다
@@ -11,11 +11,14 @@
 //   turns/<순번>-<turnId>/before/…    변경 전 스냅숏, after/… 변경 후 스냅숏
 //   turns/<순번>-<turnId>/views/…     생성한 섹션(JSON), Wait what 대화와 질문
 // 저장소 단위: ~/.claude/explanations/<저장소>-<해시>/learning.json   Known 용어, 막혔던 섹션
+// 브랜치 작업:  ~/.claude/explanations/<워크트리>-<해시>/branches/<브랜치>/   턴과 같은 형식
 
+import { baseCandidates, candidateDirs, conversationExcerpt, parseNameStatus, parseShortstat, parseWorktrees, projectDirName, slug, ticketKey } from './branches.js'
 import { buildRows } from './diff.js'
 import { SECTIONS, answerPrompt, easyPrompt, parseAt, retryPrompt, sectionPrompt, turnContext, validate } from './generate.js'
 import { diffCodeRows, diffModel, diffView, hunkList } from './views/diff.js'
 import { explainView } from './views/explain.js'
+import { listView } from './views/list.js'
 import {
   EDIT_TOOLS, MAX_FILE_BYTES, absolutePath, editedPath, looksBinary, newFileEntry, newTurn, recordEdit,
   repoFolder, storedPath, turnRecord, turnSummary,
@@ -50,8 +53,12 @@ let pos = 0
 let diffTop = 0
 let diffLeft = 0
 let diffMaxTop = 0
-// 화면: 'explain'(해설) 또는 'diff'
+// 화면: 'explain'(해설), 'diff', 'list'(작업 목록)
 let mode = 'explain'
+// 작업 목록 상태 (views/list.js 참고)
+let list = null
+// 플러그인 설정 (userConfig): base_branches
+let options = {}
 // 띄운 턴의 해설 상태: { dir, sections, open, current, threads, qa, quiz, seqLeft, understood }
 let ex = null
 // 저장소 단위 학습 기록: 이미 아는 용어, 막혔던 섹션 (다음 해설 프롬프트에 넣는다)
@@ -182,9 +189,9 @@ async function latestRecord($) {
 }
 
 // 턴 기록과 스냅숏으로 화면 데이터를 만든다
-async function loadView($, rec) {
+async function loadView($, rec, at) {
   const c = await ensureCtx($)
-  const dir = turnDir(c, rec)
+  const dir = at || turnDir(c, rec)
   const files = []
   for (const f of rec.files.filter((x) => x.changed)) {
     if (f.skipped) { files.push({ ...f, rows: [], hunks: 0 }); continue }
@@ -316,18 +323,26 @@ async function askTurn($, q) {
   $.ui.invalidate('ui.render')
 }
 
-// 퀴즈를 다 맞히면 세션 목록에 이해함으로 남긴다
+// 퀴즈를 다 맞히면 이해함으로 남긴다: 작업 폴더의 state.json, 이 세션의 턴이면 세션 목록에도
 async function markUnderstood($) {
   const c = await ensureCtx($)
   const id = view.turn.turnId
-  c.session = { ...c.session, turns: c.session.turns.map((t) => (t.turnId === id ? { ...t, understood: true } : t)) }
-  await saveJson($, c.base + '/session.json', c.session)
+  await saveJson($, view.dir + '/state.json', { understood: true })
+  if (c.session.turns.some((t) => t.turnId === id)) {
+    c.session = { ...c.session, turns: c.session.turns.map((t) => (t.turnId === id ? { ...t, understood: true } : t)) }
+    await saveJson($, c.base + '/session.json', c.session)
+  }
+}
+
+async function readUnderstood($, dir) {
+  const text = await readOrNull($, dir + '/state.json')
+  try { return !!(text && JSON.parse(text).understood) } catch { return false }
 }
 
 // 턴 하나를 해설 창에 띄운다: 저장해 둔 섹션·대화를 불러오고, 요약과 펼쳐 둔 섹션을 만든다
-async function openTurn($, rec) {
+async function openTurn($, rec, at) {
   const c = await ensureCtx($)
-  view = await loadView($, rec)
+  view = await loadView($, rec, at)
   const sections = Object.fromEntries(SECTIONS.map((s) => [s.id, { status: 'none', data: null, error: null }]))
   let quiz = { order: [], picked: [] }
   for (const s of SECTIONS) {
@@ -354,7 +369,8 @@ async function openTurn($, rec) {
     if (saved && typeof saved === 'object') open = { ...saved, summary: saved.summary !== false }
   } catch {}
   const summary = c.session.turns.find((t) => t.turnId === rec.turnId)
-  ex = { dir: view.dir, sections, open, current: 'summary', threads, qa, quiz, seqLeft: 0, understood: !!(summary && summary.understood) }
+  const understood = !!(summary && summary.understood) || (await readUnderstood($, view.dir))
+  ex = { dir: view.dir, sections, open, current: 'summary', threads, qa, quiz, seqLeft: 0, understood }
   mode = 'explain'
   pos = 0
   diffTop = 0
@@ -365,14 +381,255 @@ async function openTurn($, rec) {
   }
 }
 
+// ── 작업 목록: 브랜치(워크트리) 작업 찾기 ──────────────────────
+
+async function git($, cwd, args) {
+  try {
+    const r = await $.process.run(['git', '-C', cwd, ...args], { timeoutMs: 20000 })
+    return { ok: r.exitCode === 0, out: r.stdout }
+  } catch {
+    return { ok: false, out: '' }
+  }
+}
+
+// sh에 인자로 넘겨 실행한다 (경로를 스크립트 글에 끼워 넣지 않는다)
+async function sh($, script, args) {
+  try {
+    const r = await $.process.run(['sh', '-c', script, 'sh', ...args], { timeoutMs: 60000 })
+    return r.stdout || ''
+  } catch {
+    return ''
+  }
+}
+
+// 이 프로젝트의 대화 기록 폴더 (세션을 연 디렉토리 기준)
+async function transcriptsDir($) {
+  const c = await ensureCtx($)
+  return (await $.env.get('HOME')) + '/.claude/projects/' + projectDirName(c.cwd)
+}
+
+// 대화 기록에서 Claude가 다룬 경로들을 모아 git 저장소를 찾는다: [{ key, name, tops: [워크트리 경로] }]
+async function discoverRepos($) {
+  const c = await ensureCtx($)
+  const home = await $.env.get('HOME')
+  const dir = await transcriptsDir($)
+  const found = await sh($, 'cd "$1" 2>/dev/null || exit 0; grep -rhoE --include="*.jsonl" "\\"(file_path|cwd)\\":\\"[^\\"]+\\"|cd +[^ &;|\\"\\\\]+" . | sort -u | head -5000', [dir])
+  const dirs = [c.root, ...candidateDirs(found.split('\n'), home)]
+  const repos = new Map()
+  const tops = []
+  for (const d of dirs.slice(0, 300)) {
+    if (tops.some((t) => d === t || d.startsWith(t + '/'))) continue
+    // 대화에 나온 원격 서버 경로 등은 확인할 수 없다: 실패하면 그 경로만 건너뛴다
+    let exists = false
+    try { exists = await $.fs.exists(d) } catch {}
+    if (!exists) continue
+    const top = await git($, d, ['rev-parse', '--show-toplevel'])
+    if (!top.ok) continue
+    const root = top.out.trim()
+    tops.push(root)
+    const common = await git($, root, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+    const key = common.ok ? common.out.trim() : root + '/.git'
+    if (!repos.has(key)) {
+      const name = key.replace(/\/\.git\/?$/, '').split('/').pop()
+      repos.set(key, { key, name, root })
+    }
+  }
+  return [...repos.values()]
+}
+
+// 기준의 기본값: 브랜치를 만든 시점 (reflog). 병합된 작업도, 오래된 로컬 develop도 문제없다
+export const AUTO = 'auto'
+
+// 기준 브랜치: 저장소마다 고른 값, 없으면 자동(브랜치를 만든 시점, 그것도 없으면 설정의 후보 중 가장 가까운 것)
+async function resolveBase($, repo) {
+  const refs = await git($, repo.root, ['for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/remotes/origin'])
+  const names = refs.out.split('\n').map((x) => x.trim()).filter((x) => x && x !== 'origin/HEAD' && x !== 'origin')
+  const has = (b) => names.includes(b)
+  const pick = (b) => (has(b) ? b : has('origin/' + b) ? 'origin/' + b : '')
+  let chosen = ''
+  try { chosen = (await $.store.get('base:' + repo.key)) || '' } catch {}
+  const candidates = baseCandidates(options.base_branches)
+  const base = chosen && (chosen === AUTO || has(chosen)) ? chosen : AUTO
+  // 후보의 로컬과 origin 둘 다: 로컬이 오래됐을 수 있어서 가까운 쪽을 고른다
+  const fallbacks = candidates.flatMap((b) => [b, 'origin/' + b]).filter(has)
+  const preferred = [...candidates, 'develop', 'main', 'master'].flatMap((b) => ['origin/' + b, b]).filter(has)
+  const local = names.filter((n) => !n.startsWith('origin/'))
+  const baseOptions = [...new Set([AUTO, base, ...preferred, ...local])].filter(Boolean).slice(0, 40)
+  return { base, baseOptions, fallbacks }
+}
+
+// 브랜치가 시작된 지점: { point, label }. 고른 기준이 있으면 그것과의 merge-base
+async function branchPoint($, wt, repo) {
+  // 기준 브랜치 자체(develop, main 등)에서 하는 작업은 커밋하지 않은 변경만 본다
+  const mainline = [...baseCandidates(options.base_branches), 'master']
+  if (mainline.includes(wt.branch)) {
+    const head = await git($, wt.path, ['rev-parse', 'HEAD'])
+    return head.ok ? { point: head.out.trim(), label: '마지막 커밋', uncommittedOnly: true } : null
+  }
+  if (repo.base !== AUTO) {
+    const mb = await git($, wt.path, ['merge-base', 'HEAD', repo.base])
+    return mb.ok ? { point: mb.out.trim(), label: repo.base } : null
+  }
+  // reflog의 가장 오래된 항목이 브랜치를 만든 순간이다 ("branch: Created from origin/main")
+  const log = (await git($, wt.path, ['reflog', 'show', '--format=%H %gs', 'refs/heads/' + wt.branch])).out.trim().split('\n').filter(Boolean)
+  const first = log[log.length - 1]
+  if (first) {
+    const m = /^(\S+) branch: Created from (.+)$/.exec(first)
+    if (m) return { point: m[1], label: m[2] + '에서 만든 시점' }
+  }
+  // reflog가 없으면 후보들 중 가장 가까운(앞선 커밋이 가장 적은) 지점
+  let best = null
+  for (const b of repo.fallbacks || []) {
+    const mb = await git($, wt.path, ['merge-base', 'HEAD', b])
+    if (!mb.ok) continue
+    const n = Number((await git($, wt.path, ['rev-list', '--count', mb.out.trim() + '..HEAD'])).out.trim() || 0)
+    if (!best || n < best.n) best = { point: mb.out.trim(), label: b, n }
+  }
+  return best ? { point: best.point, label: best.label } : null
+}
+
+const branchDir = async ($, path, branch) => (await $.env.get('HOME')) + '/.claude/explanations/' + (await repoFolder(path)) + '/branches/' + slug(branch)
+
+// 워크트리 하나의 작업 요약. 시작 지점보다 앞선 커밋도, 고친 파일도 없으면 null
+async function branchItem($, wt, repo) {
+  if (!wt.branch || wt.branch === repo.base || 'origin/' + wt.branch === repo.base) return null
+  const bp = await branchPoint($, wt, repo)
+  if (!bp) return null
+  const mb = bp.point
+  const ahead = Number((await git($, wt.path, ['rev-list', '--count', mb + '..HEAD'])).out.trim() || 0)
+  const stat = parseShortstat((await git($, wt.path, ['diff', '--shortstat', mb])).out)
+  if (!ahead && !stat.files) return null
+  const dirty = !!(await git($, wt.path, ['status', '--porcelain', '--untracked-files=no'])).out.trim()
+  const date = (await git($, wt.path, ['log', '-1', '--format=%cI'])).out.trim()
+  const subjects = (await git($, wt.path, ['log', '--format=%s', mb + '..HEAD'])).out.split('\n').filter(Boolean).reverse()
+  const ticket = ticketKey(wt.branch)
+  // 제목: 티켓 키가 들어간 첫 커밋, 없으면 첫 커밋
+  const subject = bp.uncommittedOnly ? '커밋하지 않은 변경 (' + wt.branch + ')' : subjects.find((x) => ticket && x.includes(ticket)) || subjects[0] || ''
+  const dir = await branchDir($, wt.path, wt.branch)
+  return {
+    id: slug(wt.path),
+    path: wt.path,
+    branch: wt.branch,
+    ticket,
+    mb,
+    baseLabel: bp.label,
+    ahead,
+    files: stat.files,
+    added: stat.added,
+    removed: stat.removed,
+    dirty,
+    date,
+    subject,
+    subjects,
+    dir,
+    understood: await readUnderstood($, dir),
+  }
+}
+
+// 저장소 하나의 브랜치 작업들
+async function repoItems($, repo) {
+  const resolved = { ...repo, ...(await resolveBase($, repo)) }
+  const items = []
+  const wts = parseWorktrees((await git($, repo.root, ['worktree', 'list', '--porcelain'])).out)
+  for (const wt of wts) {
+    const item = await branchItem($, wt, resolved)
+    if (item) items.push(item)
+  }
+  items.sort((a, b) => (a.date < b.date ? 1 : -1))
+  return { ...resolved, items }
+}
+
+// 작업 목록을 처음부터 만든다. 저장소를 하나씩 찾을 때마다 화면에 보인다
+async function loadList($) {
+  const c = await ensureCtx($)
+  const turns = []
+  for (const t of c.session.turns) turns.push({ ...t, understood: t.understood || (await readUnderstood($, turnDir(c, t))) })
+  list = { status: 'loading', progress: '대화 기록에서 다룬 저장소를 찾는 중…', turns, repos: [], error: '' }
+  $.ui.invalidate('ui.render')
+  const repos = await discoverRepos($)
+  for (let i = 0; i < repos.length; i++) {
+    list = { ...list, progress: '저장소 ' + (i + 1) + '/' + repos.length + ' 확인 중: ' + repos[i].name }
+    $.ui.invalidate('ui.render')
+    const r = await repoItems($, repos[i])
+    list = { ...list, repos: [...list.repos, r] }
+  }
+  list = { ...list, status: 'done', progress: '' }
+  $.ui.invalidate('ui.render')
+}
+
+// 이 작업을 다룬 대화를 발췌한다: 워크트리 경로·브랜치 이름·티켓 키가 나온 세션들에서, 그 언급 주변만
+async function branchConversation($, item) {
+  const dir = await transcriptsDir($)
+  const keys = [item.path, item.branch, item.ticket].filter(Boolean)
+  const files = (await sh($, 'cd "$1" 2>/dev/null || exit 0; grep -rlF --include="*.jsonl" -e "$2" -e "$3" . | head -6', [dir, item.path, item.branch])).split('\n').filter(Boolean)
+  const parts = []
+  for (const f of files.slice(0, 4)) {
+    // 사용자·Claude 줄만. 아주 긴 줄(도구 입력 등)은 언급이 있을 때만 남긴다
+    const script = 'grep -E "\\"type\\":\\"(user|assistant)\\"" "$1" | grep -v "\\"tool_result\\"" | awk -v a="$2" -v b="$3" -v c="$4" \'length($0) < 20000 || index($0, a) || index($0, b) || (c != "" && index($0, c))\' | tail -c 3000000'
+    const lines = (await sh($, script, [dir + '/' + f.replace(/^\.\//, ''), item.path, item.branch, item.ticket || ''])).split('\n')
+    const text = conversationExcerpt(lines, Math.floor(14000 / Math.min(files.length, 4)), keys)
+    if (text) parts.push('### 세션 ' + f.replace(/^\.\//, '').slice(0, 8) + '\n' + text)
+  }
+  return parts.join('\n\n')
+}
+
+// 브랜치 작업을 턴과 같은 형식으로 가져온다: 갈라진 지점(merge-base)의 내용이 변경 전, 지금 파일이 변경 후
+async function importBranch($, repo, item) {
+  const changes = parseNameStatus((await git($, item.path, ['diff', '--name-status', '-M', item.mb])).out)
+  const untracked = (await git($, item.path, ['ls-files', '--others', '--exclude-standard'])).out.split('\n').filter(Boolean)
+  for (const p of untracked) changes.push({ status: 'A', path: p, from: null })
+  const turn = newTurn('branch-' + slug(item.branch), '', 0)
+  const afters = {}
+  for (const ch of changes.slice(0, 80)) {
+    const abs = item.path + '/' + ch.path
+    let before = null
+    if (ch.status !== 'A') {
+      const show = await git($, item.path, ['show', item.mb + ':' + (ch.from || ch.path)])
+      before = show.ok ? show.out : null
+    }
+    const after = ch.status === 'D' ? '' : await readSnapshot($, abs)
+    const skipped = after && typeof after === 'object' ? after.skipped : before && looksBinary(before) ? 'binary' : null
+    turn.files[abs] = recordEdit(newFileEntry(abs, ch.path, skipped ? undefined : before, skipped), 'git', null)
+    afters[abs] = typeof after === 'string' ? after : null
+  }
+  const request = [
+    '브랜치 ' + item.branch + ' (' + repo.name + ', 기준: ' + item.baseLabel + ')의 작업 전체.',
+    item.subjects.length ? '커밋 (오래된 것부터):\n- ' + item.subjects.join('\n- ') : '아직 커밋하지 않은 변경만 있음',
+    item.dirty ? '커밋하지 않은 변경도 포함.' : '',
+  ].filter(Boolean).join('\n')
+  const record = turnRecord(turn, afters, {
+    kind: 'branch',
+    sessionId: 'branch',
+    seq: item.ahead,
+    branch: item.branch,
+    base: item.baseLabel,
+    repo: repo.name,
+    worktree: item.path,
+    endedAt: item.date,
+    answer: '',
+    context: await branchConversation($, item),
+  })
+  record.title = (item.ticket ? item.ticket + '  ' : '') + (item.subject || item.branch)
+  record.request = request
+  for (const x of Object.values(turn.files)) {
+    if (x.skipped) continue
+    if (typeof x.before === 'string') await $.fs.write(item.dir + '/before/' + x.rel, x.before)
+    if (typeof afters[x.abs] === 'string') await $.fs.write(item.dir + '/after/' + x.rel, afters[x.abs])
+  }
+  await saveJson($, item.dir + '/turn.json', record)
+  return record
+}
+
 // ── 훅 ─────────────────────────────────────────────────────
 
-export function register(on) {
+export function register(on, opts) {
+  options = opts || {}
   on('session.start', async ($, e, next) => {
     try {
       await $.command.register({
         name: 'explain',
-        description: '마지막으로 Claude가 바꾼 내용 보기 (지금은 기록 확인용 텍스트)',
+        description: 'Claude가 바꾼 내용 해설 (마지막 변경 턴). list: 이 세션의 턴과 브랜치 작업 목록',
+        argumentHint: '[list]',
         immediate: true,
       })
     } catch (err) {
@@ -382,7 +639,7 @@ export function register(on) {
       await $.command.register({
         name: 'explain-check',
         description: '(개발용) 마지막 변경 턴의 해설 섹션 하나를 실제로 만들어 JSON으로 출력',
-        argumentHint: '[summary|background|walk|flow|seq|ba|impact|terms|quiz]',
+        argumentHint: '[섹션] [티켓 키나 브랜치]',
         immediate: true,
       })
     } catch (err) {
@@ -486,9 +743,42 @@ export function register(on) {
   }).catch(passThrough)
 
   // /explain: 마지막 변경 턴의 diff 창을 연다. 창을 그릴 수 없는 곳(claude -p 등)에서는 텍스트로 답한다
-  on('command.run', { command: 'explain' }, async ($) => {
+  on('command.run', { command: 'explain' }, async ($, e) => {
+    const arg = (e.args || '').trim()
+    const hasSurface = (await $.session.surfaces()).length > 0
+    const openPane = async () => {
+      const opened = await $.ui.open({ id: PANE, title: '변경 해설', focus: true, closeOnEscape: true, columns: WANT_COLUMNS })
+      return opened && opened.isPlaced
+    }
+    // /explain list: 이 세션의 턴과 브랜치 작업 목록
+    if (/^(list|목록|branches|history)$/.test(arg)) {
+      // 화면이 없으면 목록을 글로 (claude -p에서 확인용)
+      if (!hasSurface) {
+        await loadList($)
+        const lines = []
+        for (const t of list.turns) lines.push('#' + t.seq + '  ' + t.title + '  파일 ' + t.files + '  +' + t.added + ' −' + t.removed)
+        for (const r of list.repos) {
+          lines.push('', r.name + '  (기준: ' + (r.base === AUTO ? '자동, 브랜치를 만든 시점' : r.base) + ')')
+          for (const x of r.items) {
+            lines.push('  ' + (x.ticket ? x.ticket + '  ' : '') + (x.subject || x.branch) + '  [' + x.branch + ', ' + x.baseLabel + ']')
+            lines.push('    커밋 ' + x.ahead + '  파일 ' + x.files + '  +' + x.added + ' −' + x.removed + (x.dirty ? '  커밋 안 한 변경 있음' : '') + '  ' + x.date.slice(0, 10) + (x.understood ? '  ✓ 이해함' : ''))
+          }
+          if (!r.items.length) lines.push('  (진행 중인 브랜치 작업 없음)')
+        }
+        return { text: lines.length ? lines.join('\n') : '가져올 작업이 없습니다.' }
+      }
+      mode = 'list'
+      loadList($).catch((err) => $.ui.log('목록을 만들지 못함: ' + err))
+      return (await openPane()) ? {} : { text: '창을 열지 못했습니다. 터미널을 넓혀 주세요.' }
+    }
     const rec = await latestRecord($)
-    if (!rec) return { text: NOTHING_YET }
+    if (!rec) {
+      // 이 세션에 기록이 없으면 지난 작업 목록을 보여 준다
+      if (!hasSurface) return { text: NOTHING_YET }
+      mode = 'list'
+      loadList($).catch((err) => $.ui.log('목록을 만들지 못함: ' + err))
+      return (await openPane()) ? {} : { text: NOTHING_YET }
+    }
     const textAnswer = () => {
       const changed = rec.files.filter((f) => f.changed)
       return [
@@ -511,11 +801,21 @@ export function register(on) {
 
   // 개발용: 섹션 하나를 실제 모델로 만들어 검증 결과를 글로 보여 준다 (claude -p에서도 동작)
   on('command.run', { command: 'explain-check' }, async ($, e) => {
-    const id = (e.args || '').trim() || 'summary'
+    const [id = 'summary', target] = (e.args || '').trim().split(/\s+/)
     if (!SECTION_TITLE[id]) return { text: '섹션 이름: ' + SECTIONS.map((s) => s.id).join(', ') }
-    const rec = await latestRecord($)
-    if (!rec) return { text: NOTHING_YET }
-    view = await loadView($, rec)
+    if (target) {
+      // 브랜치 작업: 티켓 키나 브랜치 이름으로 찾아 가져온다
+      await loadList($)
+      let hit = null
+      for (const r of list.repos) for (const x of r.items) if (!hit && (x.ticket === target || x.branch === target || x.path.endsWith('/' + target))) hit = { r, x }
+      if (!hit) return { text: '작업을 찾지 못했습니다: ' + target }
+      const rec = await importBranch($, hit.r, hit.x)
+      view = await loadView($, rec, hit.x.dir)
+    } else {
+      const rec = await latestRecord($)
+      if (!rec) return { text: NOTHING_YET }
+      view = await loadView($, rec)
+    }
     const context = turnContext(view.turn, view.files, learning)
     const r = await ask($, sectionPrompt(id, context), id, context)
     return { text: r.ok ? JSON.stringify(r.value, null, 2) : '실패: ' + r.error }
@@ -532,8 +832,50 @@ export function register(on) {
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
     const el = $.ui.resolve(e)
-    if (!view) return el.Text({ color: '#858b94', children: ['/explain 으로 마지막 변경을 엽니다.'] })
     const cols = e.props.bodyColumns || 100
+    const failedList = (err) => $.ui.log('작업 목록 오류: ' + err)
+    const showList = () => {
+      mode = 'list'
+      if (!list) loadList($).catch(failedList)
+      $.ui.invalidate('ui.render')
+      $.ui.scroll({ in: PANE, to: 'start' }).catch(() => {})
+    }
+
+    // ── 작업 목록 ──
+    if (mode === 'list' || !view) {
+      if (!list) return el.Text({ color: '#858b94', children: ['작업을 찾는 중…'] })
+      return listView(el, cols, list, {
+        refresh: () => { if (list.status !== 'loading') loadList($).catch(failedList) },
+        back: view ? () => { mode = 'explain'; $.ui.invalidate('ui.render') } : null,
+        openTurn: async (t) => {
+          const c = await ensureCtx($)
+          const text = await readOrNull($, turnDir(c, t) + '/turn.json')
+          if (!text) return
+          await openTurn($, JSON.parse(text))
+          $.ui.invalidate('ui.render')
+          $.ui.scroll({ in: PANE, to: 'start' }).catch(() => {})
+        },
+        openBranch: async (repo, item) => {
+          list = { ...list, progress: item.branch + ' 가져오는 중…', status: 'loading' }
+          $.ui.invalidate('ui.render')
+          try {
+            const rec = await importBranch($, repo, item)
+            await openTurn($, rec, item.dir)
+          } catch (err) {
+            list = { ...list, error: '가져오지 못했습니다: ' + err }
+          }
+          list = { ...list, status: 'done', progress: '' }
+          $.ui.invalidate('ui.render')
+          $.ui.scroll({ in: PANE, to: 'start' }).catch(() => {})
+        },
+        setBase: async (repo, value) => {
+          await $.store.set('base:' + repo.key, value).catch(() => {})
+          const updated = await repoItems($, repo)
+          list = { ...list, repos: list.repos.map((r) => (r.key === repo.key ? updated : r)) }
+          $.ui.invalidate('ui.render')
+        },
+      })
+    }
     const bodyRows = (e.props.scroll && e.props.scroll.bodyRows) || 30
     const redraw = () => $.ui.invalidate('ui.render')
     const reveal = (key) => { $.ui.scroll({ in: PANE, to: { key }, block: 'start' }).catch(() => {}) }
@@ -603,6 +945,7 @@ export function register(on) {
 
     return explainView(el, cols, { turn: view.turn, files: view.files, ...ex, known: learning.known, codeFor }, {
       openDiff,
+      list: showList,
       toggle: (id) => toggle(id, true),
       toc: (id) => { if (!ex.open[id]) toggle(id, true); else reveal('sec-' + id) },
       toggleAll: (target) => { SECTIONS.forEach((s) => { if (!!ex.open[s.id] !== target) toggle(s.id, false) }) },

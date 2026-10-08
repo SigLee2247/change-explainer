@@ -86,7 +86,7 @@ test('긴 파일은 코드 영역만 j/k로 스크롤하고, 변경으로 이동
   expect(await ui.find({ type: 'Text', text: 'LINE 50' })).toBeDefined()
 })
 
-test('기록된 변경이 없으면 /explain은 안내만 한다', async ($, on) => {
-  setup(on, {})
+test('화면이 없는 곳에서 기록된 변경이 없으면 /explain은 안내만 한다', async ($, on) => {
+  setup(on, {}, { headless: true })
   expect((await $.command.run({ command: 'explain', args: '' })).text).toMatch(/아직 기록된 변경이 없습니다/)
 })
