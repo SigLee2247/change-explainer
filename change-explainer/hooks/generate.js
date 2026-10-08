@@ -73,13 +73,23 @@ export function turnContext(turn, files, learning) {
   return { text: lines.join('\n'), hunkCount: d.hunkCount }
 }
 
-const RULES = [
-  '- 한국어로, 짧고 쉬운 문장으로 쓴다. 한 문장에 하나의 생각.',
-  '- 이 대화와 위 diff에 근거해서 쓴다. 대화에 근거가 없는 이유는 문장 끝에 "(추정)"을 붙인다.',
-  '- 정의하지 않은 전문 용어를 쓰지 않는다. 꼭 필요하면 쉬운 말로 풀어서 함께 쓴다.',
-  '- 코드는 짧은 식별자(함수 이름 등)만 인용한다. 코드 블록을 쓰지 않는다.',
-  '- 답은 JSON 객체 하나뿐이다. 앞뒤에 설명이나 ``` 를 붙이지 않는다.',
-]
+// 해설을 쓸 언어 (설정 language): 'ko' 또는 'en'
+let language = 'ko'
+export function setLanguage(lang) {
+  language = lang === 'en' ? 'en' : 'ko'
+}
+
+function rules() {
+  return [
+    language === 'en'
+      ? '- Write every text value in English, in short plain sentences. One idea per sentence.'
+      : '- 한국어로, 짧고 쉬운 문장으로 쓴다. 한 문장에 하나의 생각.',
+    '- 이 대화와 위 diff에 근거해서 쓴다. 대화에 근거가 없는 이유는 문장 끝에 ' + (language === 'en' ? '"(guess)"' : '"(추정)"') + '을 붙인다.',
+    '- 정의하지 않은 전문 용어를 쓰지 않는다. 꼭 필요하면 쉬운 말로 풀어서 함께 쓴다.',
+    '- 코드는 짧은 식별자(함수 이름 등)만 인용한다. 코드 블록을 쓰지 않는다.',
+    '- 답은 JSON 객체 하나뿐이다. 앞뒤에 설명이나 ``` 를 붙이지 않는다.',
+  ]
+}
 
 // 섹션별 지시와 출력 형식
 const SECTION_SPECS = {
@@ -169,7 +179,7 @@ export function sectionPrompt(id, ctx) {
     ...spec,
     '',
     '## 규칙',
-    ...RULES,
+    ...rules(),
   ].join('\n')
 }
 
@@ -195,7 +205,7 @@ export function easyPrompt(id, ctx, sectionJson, thread) {
     '형식: { "text": "다시 설명한 글. 3~6문장" }',
     '',
     '## 규칙',
-    ...RULES,
+    ...rules(),
   ].join('\n')
 }
 
@@ -217,7 +227,7 @@ export function answerPrompt(question, ctx, section) {
     '형식: { "text": "답. 필요한 만큼, 보통 2~6문장" }',
     '',
     '## 규칙',
-    ...RULES,
+    ...rules(),
   ].join('\n')
 }
 

@@ -60,9 +60,19 @@ export function candidateDirs(lines, home) {
   return [...seen].sort()
 }
 
-// 브랜치 이름에서 티켓 키 (SHOP-217 같은)
+// 티켓 키 형식 (설정 ticket_pattern, 정규식). 기본은 Jira 형식(SHOP-217). GitHub 이슈라면 예: #\d+ 또는 \d+
+let ticketPattern = /([A-Z][A-Z0-9]+-\d+)/
+export function setTicketPattern(source) {
+  try {
+    ticketPattern = source ? new RegExp('(' + source + ')') : /([A-Z][A-Z0-9]+-\d+)/
+  } catch {
+    ticketPattern = /([A-Z][A-Z0-9]+-\d+)/
+  }
+}
+
+// 브랜치 이름에서 티켓 키
 export function ticketKey(branch) {
-  const m = /([A-Z][A-Z0-9]+-\d+)/.exec(branch || '')
+  const m = ticketPattern.exec(branch || '')
   return m ? m[1] : ''
 }
 

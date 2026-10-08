@@ -6,25 +6,38 @@
 // - 다이어그램과 코드 줄은 줄바꿈 대신 잘라낸다(wrap: 'truncate-end').
 // - 한글은 2칸을 차지하므로 다이어그램 줄에서 한글은 줄 끝에만 둔다.
 
-export const C = {
-  fg: '#d6d6d6',
-  title: '#f0f0f0',
-  dim: '#858b94',
-  faint: '#5c6370',
-  rule: '#2f3238',
-  accent: '#e3a857',
-  blue: '#79b8ff',
-  green: '#7fc79a',
-  red: '#f08c7c',
-  purple: '#c3a6ff',
+const DARK = {
+  C: {
+    fg: '#d6d6d6', title: '#f0f0f0', dim: '#858b94', faint: '#5c6370', rule: '#2f3238',
+    accent: '#e3a857', blue: '#79b8ff', green: '#7fc79a', red: '#f08c7c', purple: '#c3a6ff',
+  },
+  // diff 배경색 (인텔리제이 다크 테마 계열)
+  D: {
+    add: '#1f3a28', addHi: '#2f6e41', mod: '#1c2c43', modHi: '#2f5a8f', modFill: '#151d29',
+    del: '#2a2c31', fill: '#16171a', rem: '#3a2326', remHi: '#6e2f36',
+  },
 }
 
-// diff 배경색 (인텔리제이 다크 테마 계열)
-export const D = {
-  add: '#1f3a28', addHi: '#2f6e41',
-  mod: '#1c2c43', modHi: '#2f5a8f', modFill: '#151d29',
-  del: '#2a2c31', fill: '#16171a',
-  rem: '#3a2326', remHi: '#6e2f36',
+const LIGHT = {
+  C: {
+    fg: '#1f2328', title: '#0d1117', dim: '#57606a', faint: '#8c959f', rule: '#d0d7de',
+    accent: '#9a6700', blue: '#0969da', green: '#1a7f37', red: '#cf222e', purple: '#8250df',
+  },
+  D: {
+    add: '#dafbe1', addHi: '#aceebb', mod: '#ddf4ff', modHi: '#b6e3ff', modFill: '#f1f8ff',
+    del: '#eaeef2', fill: '#f6f8fa', rem: '#ffebe9', remHi: '#ffcecb',
+  },
+}
+
+// 화면이 쓰는 색. applyTheme으로 바꾼다
+export const C = { ...DARK.C }
+export const D = { ...DARK.D }
+
+// 설정 theme: 'dark'(기본) 또는 'light'
+export function applyTheme(name) {
+  const t = name === 'light' ? LIGHT : DARK
+  Object.assign(C, t.C)
+  Object.assign(D, t.D)
 }
 
 // 한 줄(또는 한 문단) 안의 색 조각들: parts = ['plain' | [text, color, bold?, background?], ...]

@@ -15,9 +15,10 @@
 // 저장소 단위: ~/.claude/explanations/<저장소>-<해시>/learning.json   Known 용어, 막혔던 섹션
 // 브랜치 작업:  ~/.claude/explanations/<워크트리>-<해시>/branches/<브랜치>/   턴과 같은 형식
 
-import { baseCandidates, candidateDirs, commandDirs, parseStatus, conversationExcerpt, parseNameStatus, parseShortstat, parseWorktrees, projectDirName, slug, ticketKey } from './branches.js'
+import { baseCandidates, candidateDirs, commandDirs, parseStatus, setTicketPattern, conversationExcerpt, parseNameStatus, parseShortstat, parseWorktrees, projectDirName, slug, ticketKey } from './branches.js'
 import { buildRows } from './diff.js'
-import { SECTIONS, answerPrompt, easyPrompt, parseAt, retryPrompt, sectionPrompt, turnContext, validate } from './generate.js'
+import { SECTIONS, setLanguage, answerPrompt, easyPrompt, parseAt, retryPrompt, sectionPrompt, turnContext, validate } from './generate.js'
+import { applyTheme } from './views/common.js'
 import { diffCodeRows, diffModel, diffView, hunkList } from './views/diff.js'
 import { explainView } from './views/explain.js'
 import { listView } from './views/list.js'
@@ -59,7 +60,7 @@ let diffMaxTop = 0
 let mode = 'explain'
 // 작업 목록 상태 (views/list.js 참고)
 let list = null
-// 플러그인 설정 (userConfig): base_branches
+// 플러그인 설정 (userConfig): base_branches, language, theme, model, ticket_pattern
 let options = {}
 // 띄운 턴의 해설 상태: { dir, sections, open, current, threads, qa, quiz, seqLeft, understood }
 let ex = null
@@ -329,8 +330,11 @@ async function callModel($, prompt) {
     if (r.isAnswered) return { text: r.text }
     if (r.reason !== 'nothing-to-fork') return { error: r.reason + (r.status ? ' ' + r.status : '') }
   }
-  let model = 'sonnet'
-  try { model = (await $.session.model()) || model } catch {}
+  // 설정 model이 있으면 그것, 없으면 세션 모델
+  let model = options.model && options.model !== 'session' ? options.model : 'sonnet'
+  if (!options.model || options.model === 'session') {
+    try { model = (await $.session.model()) || model } catch {}
+  }
   const r = await $.model.complete({
     model,
     system: '너는 코드 변경을 사용자에게 해설하는 도우미다. 요청한 JSON 객체 하나만 답한다.',
@@ -729,6 +733,9 @@ async function importBranch($, repo, item) {
 
 export function register(on, opts) {
   options = opts || {}
+  applyTheme(options.theme)
+  setLanguage(options.language)
+  setTicketPattern(options.ticket_pattern)
   on('session.start', async ($, e, next) => {
     try {
       await $.command.register({
@@ -740,7 +747,8 @@ export function register(on, opts) {
     } catch (err) {
       $.ui.log('/explain 등록 실패: ' + err)
     }
-    try {
+    // 개발용 명령은 CHANGE_EXPLAINER_DEV=1 일 때만
+    if ((await $.env.get('CHANGE_EXPLAINER_DEV')) === '1') try {
       await $.command.register({
         name: 'explain-check',
         description: '(개발용) 마지막 변경 턴의 해설 섹션 하나를 실제로 만들어 JSON으로 출력',

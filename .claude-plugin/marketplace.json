@@ -1,0 +1,12 @@
+{
+  "name": "change-explainer",
+  "description": "change-explainer: a Claude Code mod that explains what Claude changed and why",
+  "owner": { "name": "siglee" },
+  "plugins": [
+    {
+      "name": "change-explainer",
+      "source": "./change-explainer",
+      "description": "Explains each turn's changes (summary, code walkthrough, diagrams, IntelliJ-style diff, quiz) and lists past work per branch"
+    }
+  ]
+}

@@ -1,16 +1,47 @@
 {
   "name": "change-explainer",
   "version": "0.1.0",
-  "description": "Claude가 턴마다 바꾼 코드를 기록하고, 무엇을 왜 어떻게 바꿨는지 터미널 창에서 해설합니다",
+  "description": "Explains what Claude changed in each turn, and why: summary, code walkthrough, flow and sequence diagrams, IntelliJ-style diff, quiz. Also lists past work per branch. 변경 해설 mod.",
   "author": {
     "name": "siglee"
   },
+  "keywords": [
+    "mod",
+    "explain",
+    "diff",
+    "learning",
+    "code-review"
+  ],
   "userConfig": {
     "base_branches": {
       "type": "string",
       "title": "기준 브랜치 후보",
       "description": "브랜치 작업을 비교할 기준 브랜치. 쉼표로 여러 개를 적으면 저장소에 있는 첫 번째를 씁니다. 저장소마다 작업 목록에서 따로 바꿀 수 있습니다.",
       "default": "develop,main"
+    },
+    "language": {
+      "type": "string",
+      "title": "Explanation language / 해설 언어",
+      "description": "ko 또는 en. 모델이 쓰는 해설의 언어입니다 (화면 문구는 아직 한국어).",
+      "default": "ko"
+    },
+    "theme": {
+      "type": "string",
+      "title": "Terminal theme / 터미널 테마",
+      "description": "dark 또는 light. 라이트 테마 터미널이면 light로 바꾸세요.",
+      "default": "dark"
+    },
+    "model": {
+      "type": "string",
+      "title": "Model for past work / 지난 작업 해설 모델",
+      "description": "session이면 세션 모델. haiku, sonnet, opus 같은 별칭이나 모델 id. 지금 세션의 턴은 항상 현재 대화를 fork합니다.",
+      "default": "session"
+    },
+    "ticket_pattern": {
+      "type": "string",
+      "title": "Ticket key pattern / 티켓 키 형식",
+      "description": "브랜치 이름에서 티켓 키를 찾는 정규식. 기본은 Jira 형식. GitHub 이슈면 예: #\\d+",
+      "default": "[A-Z][A-Z0-9]+-\\d+"
     }
   }
 }

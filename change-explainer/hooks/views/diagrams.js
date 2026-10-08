@@ -2,13 +2,14 @@
 
 import { C, rich, shift } from './common.js'
 
-const KIND_COLOR = { step: C.faint, cond: C.blue, changed: C.accent, ok: C.green, err: C.red }
+// 색은 그릴 때 읽는다 (테마 설정이 C를 바꾸므로)
+const kindColor = (kind) => ({ step: C.faint, cond: C.blue, changed: C.accent, ok: C.green, err: C.red })[kind] || C.faint
 
 // ── 흐름도 ───────────────────────────────────────────────────
 // data: { nodes: [{ title, desc, kind, tag, next, branch }] }
 
 function card(el, item, n, width) {
-  const color = KIND_COLOR[item.kind] || C.faint
+  const color = kindColor(item.kind)
   const titleColor = item.kind === 'err' ? C.red : item.kind === 'ok' ? C.green : C.title
   const rows = [rich(el, [n ? [n + '  ', C.accent, true] : '', [item.title, titleColor, true]])]
   if (item.desc) rows.push(el.Text({ color: C.dim, children: [item.desc] }))
@@ -34,7 +35,7 @@ export function flowView(el, data, cols) {
   data.nodes.forEach((item, i) => {
     const main = card(el, item, i + 1, cardW)
     if (item.branch) {
-      const arrow = el.Text({ color: KIND_COLOR[item.branch.kind] || C.faint, children: [' ─ ' + (item.branch.label || '') + ' ─> '] })
+      const arrow = el.Text({ color: kindColor(item.branch.kind), children: [' ─ ' + (item.branch.label || '') + ' ─> '] })
       const side = card(el, item.branch, 0)
       out.push(
         wide
@@ -60,8 +61,8 @@ export function flowView(el, data, cols) {
 // 라벨과 설명은 줄 끝에만 둔다(한글 폭 때문에). 왼쪽 번호 칸은 고정, 나머지는 left만큼 가로로 민다.
 
 const GUTTER = 3
-const LANE_COLORS = [C.dim, C.fg, C.accent, C.blue, C.purple, C.green]
-const MSG_COLOR = { normal: C.fg, changed: C.accent, fail: C.red, ok: C.green }
+const laneColor = (i) => [C.dim, C.fg, C.accent, C.blue, C.purple, C.green][i % 6]
+const msgColor = (kind) => ({ normal: C.fg, changed: C.accent, fail: C.red, ok: C.green })[kind] || C.fg
 
 function widthOf(s) {
   let w = 0
@@ -106,7 +107,7 @@ export function seqView(el, data, cols, left) {
 
   // 참여자 머리 상자 세 줄. 아래 테두리의 ┬가 생명선과 같은 칸에 온다
   const inner = laneW - 3
-  const colorOf = (i) => LANE_COLORS[i % LANE_COLORS.length]
+  const colorOf = laneColor
   const fit = (name) => (name.length > inner ? name.slice(0, inner - 1) + '…' : name)
   const middle = (name) => {
     const t = fit(name)
@@ -120,7 +121,7 @@ export function seqView(el, data, cols, left) {
     row('   ', boxLine(() => '╰' + '─'.repeat(Math.floor(laneW / 2) - 1) + '┬' + '─'.repeat(inner - Math.floor(laneW / 2)) + '╯')),
   ]
   data.msgs.forEach((m, i) => {
-    const color = MSG_COLOR[m.kind] || C.fg
+    const color = msgColor(m.kind)
     const l = Math.min(center(m.from), center(m.to))
     const r = Math.max(center(m.from), center(m.to))
     rows.push(row(String(i + 1).padStart(2, ' ') + ' ', textAt(l + 2, [[m.label, color, true]])))
