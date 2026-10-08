@@ -5,6 +5,9 @@ const J = (o: any) => JSON.stringify(o)
 const TRANSCRIPT = [
   J({ type: 'user', uuid: 'u1', timestamp: '2026-10-02T01:00:00Z', message: { content: 'SHOP-1 상한을 200으로 고쳐줘' } }),
   J({ type: 'assistant', timestamp: '2026-10-02T01:01:00Z', message: { content: [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: "cd /w/api && sed -i 's/100/200/' src/A.java && git commit -qam 'fix(SHOP-1): 상한 200'" } }] } }),
+  // 같은 턴에 Edit으로도 고쳤다 (커밋하지 않은 파일)
+  J({ type: 'assistant', timestamp: '2026-10-02T01:01:30Z', message: { content: [{ type: 'tool_use', id: 'e1', name: 'Edit', input: { file_path: '/w/api/src/B.java', old_string: 'min = 1', new_string: 'min = 0' } }] } }),
+  J({ type: 'user', timestamp: '2026-10-02T01:01:31Z', toolUseResult: { filePath: '/w/api/src/B.java', originalFile: 'class B { int min = 1; }\n' }, message: { content: [{ type: 'tool_result', tool_use_id: 'e1', content: 'ok' }] } }),
   J({ type: 'assistant', timestamp: '2026-10-02T01:02:00Z', message: { content: [{ type: 'text', text: '상한을 200으로 올리고 커밋했습니다.' }] } }),
   J({ type: 'user', uuid: 'u2', timestamp: '2026-10-02T02:00:00Z', message: { content: '이거 왜 200이야?' } }),
   J({ type: 'assistant', timestamp: '2026-10-02T02:00:10Z', message: { content: [{ type: 'text', text: '요청하신 값입니다.' }] } }),
@@ -112,8 +115,11 @@ test('지난 턴을 열면 그 시간대의 내 커밋에서 변경을 복원하
 
   const key = [...writes.keys()].find((k) => k.endsWith('/s1/turns/0001-h-u1/turn.json'))!
   const rec = JSON.parse(writes.get(key)!)
-  expect(rec).toMatchObject({ kind: 'past', sessionId: 's1', added: 1, removed: 1, commits: [{ repo: 'api', sha: 'c1' }] })
-  expect(rec.files).toMatchObject([{ path: 'api/src/A.java', tools: ['git commit'] }])
+  expect(rec).toMatchObject({ kind: 'past', sessionId: 's1', added: 2, removed: 2, commits: [{ repo: 'api', sha: 'c1' }] })
+  // 커밋에서 복원한 파일과, 대화 기록의 Edit에서 복원한 파일 둘 다
+  expect(rec.files).toMatchObject([{ path: 'api/src/A.java', tools: ['git commit'] }, { path: 'api/src/B.java', tools: ['Edit'], added: 1, removed: 1 }])
+  const after = [...writes.keys()].find((k) => k.endsWith('/0001-h-u1/after/api/src/B.java'))!
+  expect(writes.get(after)).toBe('class B { int min = 0; }\n')
   // 해설 맥락: 그 턴의 요청과 Claude의 설명, 그리고 커밋
   expect(prompts[0]).toMatch(/사용자: SHOP-1 상한을 200으로 고쳐줘/)
   expect(prompts[0]).toMatch(/Claude: 상한을 200으로 올리고 커밋했습니다\./)

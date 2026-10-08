@@ -19,7 +19,7 @@
 import { commandDirs, parseNameStatus, parseStatus, projectDirName } from './git.js'
 import { isWorkPath, localDay, madeByTurn, parseLog, promptText, turnsFromTranscript } from './history.js'
 import { buildRows } from './diff.js'
-import { SECTIONS, setLanguage, answerPrompt, easyPrompt, parseAt, retryPrompt, sectionPrompt, turnContext, validate } from './generate.js'
+import { SECTIONS, setLanguage, answerPrompt, easyPrompt, joinBlocks, parseAt, retryPrompt, sectionPrompt, turnContext, validate } from './generate.js'
 import { applyTheme } from './views/common.js'
 import { diffCodeRows, diffModel, diffView, hunkList } from './views/diff.js'
 import { explainView } from './views/explain.js'
@@ -326,16 +326,17 @@ function shuffled(n) {
 const newQuiz = (data) => ({ order: data.questions.map((q) => shuffled(q.options.length)), picked: data.questions.map(() => null) })
 
 // 모델 호출: 이 세션의 턴이면 현재 대화를 fork(맥락을 알고, 캐시로 싸다), 아니면 요청문·답변·diff만으로 complete
+// prompt: 블록 목록 (generate.js). fork에는 글로 합쳐 보내고, complete에는 캐시 표시를 살려 보낸다
 async function callModel($, prompt) {
   const c = await ensureCtx($)
-  if (!view || view.turn.sessionId === c.sessionId) {
-    const r = await $.model.fork({ prompt })
+  if (!evalModel && (!view || view.turn.sessionId === c.sessionId)) {
+    const r = await $.model.fork({ prompt: joinBlocks(prompt) })
     if (r.isAnswered) return { text: r.text, usage: r.usage }
     if (r.reason !== 'nothing-to-fork') return { error: r.reason + (r.status ? ' ' + r.status : ''), usage: r.usage }
   }
   // 설정 model이 있으면 그것, 없으면 세션 모델
-  let model = options.model && options.model !== 'session' ? options.model : 'sonnet'
-  if (!options.model || options.model === 'session') {
+  let model = evalModel || (options.model && options.model !== 'session' ? options.model : 'sonnet')
+  if (!evalModel && (!options.model || options.model === 'session')) {
     try { model = (await $.session.model()) || model } catch {}
   }
   const r = await $.model.complete({
@@ -350,6 +351,9 @@ async function callModel($, prompt) {
 
 // ── 토큰 사용량 ──
 // 모델이 보고한 사용량을 해설 단위(턴)와 저장소 단위로 쌓는다
+
+// /explain-check model=… 로 모델을 정해 평가할 때만 (fork하지 않고 그 모델로)
+let evalModel = null
 
 const emptyUsage = () => ({ calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
 
@@ -369,6 +373,11 @@ let repoUsage = null
 
 async function recordUsage($, target, u) {
   if (!u) return
+  // 개발용 평가(/explain-check model=…)는 사용자의 사용량에 넣지 않는다
+  if (evalModel) {
+    if (target) target.usage = addUsage(target.usage || emptyUsage(), u)
+    return
+  }
   const c = await ensureCtx($)
   if (!repoUsage) {
     const saved = await readOrNull($, c.repoBase + '/usage.json')
@@ -389,7 +398,7 @@ async function ask($, prompt, kind, check, target) {
   if (reply.error) return { ok: false, error: '모델 응답 없음(' + reply.error + ')' }
   let v = validate(kind, reply.text, check)
   if (v.ok) return v
-  reply = await callModel($, prompt + '\n\n' + retryPrompt(v.error))
+  reply = await callModel($, [...prompt, { text: '\n\n' + retryPrompt(v.error) }])
   await recordUsage($, target, reply.usage)
   if (reply.error) return { ok: false, error: '모델 응답 없음(' + reply.error + ')' }
   v = validate(kind, reply.text, check)
@@ -654,10 +663,11 @@ async function loadSessionTurns($, sessionId) {
     // 실제로 바뀐 것이 있는 턴만: Edit/Write 변경, 또는 그 시간대의 커밋
     const subjects = []
     if (t.bashCommands.length) for (const top of await turnRepos($, t)) for (const cm of await turnCommits($, top, t)) subjects.push(cm.subject)
-    const files = Object.keys(t.files).length
+    const fileCount = Object.keys(t.files).length
     // "가자"처럼 짧은 요청만으로는 무슨 턴인지 모른다: 커밋 메시지와 바꾼 파일 이름을 함께 보여 준다
     const fileNames = Object.keys(t.files).map((x) => x.split('/').pop())
-    if (files || subjects.length) out.push({ ...t, seq: i + 1, files, commits: subjects.length, subjects, fileNames })
+    // files는 복원에 쓰는 파일 내용 그대로 두고, 개수는 fileCount로
+    if (fileCount || subjects.length) out.push({ ...t, seq: i + 1, fileCount, commits: subjects.length, subjects, fileNames })
   }
   return out
 }
@@ -719,7 +729,7 @@ async function reconstructTurn($, sessionId, t) {
 }
 
 // 지난 세션 하나의 "바뀐 턴" 목록. 대화 기록 파일이 그대로면 저장해 둔 것을 쓴다
-const PAST_INDEX_VERSION = 1
+const PAST_INDEX_VERSION = 2
 async function sessionItems($, ses) {
   const c = await ensureCtx($)
   const file = c.repoBase + '/past-index/' + ses.id + '.json'
@@ -741,7 +751,7 @@ async function sessionItems($, ses) {
       at: localDay(Date.parse(t.startAt)),
       subjects: t.subjects,
       fileNames: t.fileNames,
-      files: t.files,
+      files: t.fileCount,
       commits: t.commits,
     }))
     await saveJson($, file, { v: PAST_INDEX_VERSION, mtimeMs: ses.mtimeMs, size: ses.size, items })
@@ -982,8 +992,14 @@ export function register(on, opts) {
 
   // 개발용: 섹션 하나를 실제 모델로 만들어 검증 결과를 글로 보여 준다 (claude -p에서도 동작)
   on('command.run', { command: 'explain-check' }, async ($, e) => {
-    const [id = 'summary', target] = (e.args || '').trim().split(/\s+/)
-    if (!SECTION_TITLE[id]) return { text: '섹션 이름: ' + SECTIONS.map((s) => s.id).join(', ') }
+    // /explain-check <섹션|all|섹션,섹션> [세션 id 앞부분/턴 번호] [model=sonnet] [json]
+    const words = (e.args || '').trim().split(/\s+/).filter(Boolean)
+    const flags = Object.fromEntries(words.filter((w) => w.includes('=')).map((w) => w.split('=')))
+    const plain = words.filter((w) => !w.includes('='))
+    const asJson = plain.includes('json')
+    const [which = 'summary', target] = plain.filter((w) => w !== 'json')
+    const ids = which === 'all' ? SECTIONS.map((x) => x.id) : which.split(',')
+    if (ids.some((id) => !SECTION_TITLE[id])) return { text: '섹션 이름: all, ' + SECTIONS.map((x) => x.id).join(', ') }
     if (target) {
       // 지난 세션의 턴: "<세션 id 앞부분>/<턴 번호>"
       const [prefix, num] = target.split('/')
@@ -999,12 +1015,25 @@ export function register(on, opts) {
       if (!rec) return { text: NOTHING_YET }
       view = await loadView($, rec)
     }
-    const context = turnContext(view.turn, view.files, learning)
-    const used = { dir: view.dir, usage: emptyUsage() }
-    const r = await ask($, sectionPrompt(id, context), id, context, used)
-    const u = used.usage
-    const usageLine = '\n토큰: 호출 ' + u.calls + '회, 입력 ' + u.input + ' (캐시 읽기 ' + u.cacheRead + ', 캐시 쓰기 ' + u.cacheWrite + '), 출력 ' + u.output
-    return { text: (r.ok ? JSON.stringify(r.value, null, 2) : '실패: ' + r.error) + usageLine }
+    evalModel = flags.model || null
+    try {
+      const context = turnContext(view.turn, view.files, learning)
+      const total = { dir: view.dir, usage: emptyUsage() }
+      const sections = {}
+      for (const id of ids) {
+        const used = { dir: view.dir, usage: emptyUsage() }
+        const started = Date.now()
+        const r = await ask($, sectionPrompt(id, context), id, context, used)
+        sections[id] = { ok: r.ok, value: r.value, error: r.error, usage: used.usage, ms: Date.now() - started }
+        for (const k of Object.keys(total.usage)) total.usage[k] += used.usage[k]
+      }
+      if (asJson) return { text: JSON.stringify({ model: evalModel || 'session', turn: target || 'latest', context: context.text, sections, usage: total.usage }) }
+      const u = total.usage
+      const usageLine = '\n토큰: 호출 ' + u.calls + '회, 입력 ' + u.input + ' (캐시 읽기 ' + u.cacheRead + ', 캐시 쓰기 ' + u.cacheWrite + '), 출력 ' + u.output
+      return { text: ids.map((id) => (sections[id].ok ? JSON.stringify(sections[id].value, null, 2) : id + ' 실패: ' + sections[id].error)).join('\n\n') + usageLine }
+    } finally {
+      evalModel = null
+    }
   })
 
   // diff 창에서는 휠과 스크롤 키로 창 전체가 아니라 코드 영역만 움직인다

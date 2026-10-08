@@ -94,7 +94,7 @@ Set them with `/plugin configure change-explainer@change-explainer`, or pass `--
 
 ```bash
 claude --plugin-dir ./change-explainer          # load with hot reload
-cd change-explainer && claude plugin test       # 50 tests, no session or network needed
+cd change-explainer && claude plugin test       # 51 tests, no session or network needed
 claude plugin validate ./change-explainer --strict
 claude plugin validate .                        # the marketplace file
 ```

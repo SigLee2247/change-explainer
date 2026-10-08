@@ -167,35 +167,41 @@ const SECTION_SPECS = {
   ],
 }
 
-export function sectionPrompt(id, ctx) {
-  const spec = SECTION_SPECS[id](ctx.hunkCount)
+// 프롬프트는 블록 두 개다: 앞은 같은 턴의 모든 요청(섹션, Wait what, 질문)이 똑같이 여는 글이라
+// 프롬프트 캐시에 올리고(5분 안의 다음 요청은 약 1/10 값으로 읽는다), 뒤에 이번 요청만의 지시를 붙인다
+function shared(ctx) {
   return [
     '[change-explainer 요청: 코드를 고치거나 도구를 쓰지 말고, 요청한 JSON 하나만 답해줘]',
-    '사용자가 방금 Claude가 한 변경을 이해하려고 한다. 아래 턴을 해설해.',
+    '사용자가 Claude가 한 변경을 이해하려고 한다. 아래는 그 턴이다.',
     '',
     ctx.text,
     '',
-    '## 지금 만들 것: ' + SECTIONS.find((s) => s.id === id).title,
-    ...spec,
-    '',
-    '## 규칙',
+    '## 규칙 (모든 답에)',
     ...rules(),
+    '',
   ].join('\n')
+}
+
+const blocks = (ctx, lines) => [{ text: shared(ctx), cache: true }, { text: lines.join('\n') }]
+
+// 블록 → 글 하나 (fork는 글만 받는다)
+export const joinBlocks = (prompt) => (typeof prompt === 'string' ? prompt : prompt.map((b) => b.text).join(''))
+
+export function sectionPrompt(id, ctx) {
+  return blocks(ctx, ['## 지금 만들 것: ' + SECTIONS.find((s) => s.id === id).title, ...SECTION_SPECS[id](ctx.hunkCount)])
 }
 
 // Wait, what?: 같은 내용을 더 쉽게, 앞의 설명들과 다른 방식으로
 export function easyPrompt(id, ctx, sectionJson, thread) {
   const tried = thread.filter((x) => x.type === 'easy' && x.text).map((x, i) => '설명 ' + (i + 1) + ': ' + x.text)
   const asked = thread.filter((x) => x.type === 'q' && x.a).map((x) => 'Q: ' + x.q + '\nA: ' + x.a)
-  return [
-    '[change-explainer 요청: 코드를 고치거나 도구를 쓰지 말고, 요청한 JSON 하나만 답해줘]',
+  return blocks(ctx, [
+    '## 지금 할 것: 다시 설명',
     '사용자가 아래 해설 섹션을 읽고 "잠깐, 무슨 말이야?"라고 했다. 이해하지 못했다.',
     '짧게 줄이지 말고, 사용자가 놓쳤을 전제를 채워서 더 쉬운 말로 다시 설명해.',
     tried.length
       ? '아래 설명들은 이미 했지만 통하지 않았다. 같은 비유나 같은 순서를 반복하지 말고, 아직 안 쓴 방식(비유, 전제를 하나씩 짚기, 숫자 예, 실행 순서 따라가기 중)으로 설명해.'
       : '일상의 비유로 시작해도 좋다.',
-    '',
-    ctx.text,
     '',
     '## 사용자가 막힌 섹션: ' + SECTIONS.find((s) => s.id === id).title,
     JSON.stringify(sectionJson),
@@ -203,19 +209,14 @@ export function easyPrompt(id, ctx, sectionJson, thread) {
     ...(asked.length ? ['', '## 이 섹션에서 사용자가 한 질문과 답', ...asked] : []),
     '',
     '형식: { "text": "다시 설명한 글. 3~6문장" }',
-    '',
-    '## 규칙',
-    ...rules(),
-  ].join('\n')
+  ])
 }
 
 // 질문: sectionId가 있으면 그 섹션과 대화 상자를 맥락으로, 없으면 턴 전체에 대해
 export function answerPrompt(question, ctx, section) {
-  return [
-    '[change-explainer 요청: 코드를 고치거나 도구를 쓰지 말고, 요청한 JSON 하나만 답해줘]',
+  return blocks(ctx, [
+    '## 지금 할 것: 질문에 답하기',
     '사용자가 Claude가 한 변경에 대해 질문했다. 이 대화와 diff에 근거해서 답해.',
-    '',
-    ctx.text,
     ...(section
       ? ['', '## 질문이 나온 섹션: ' + SECTIONS.find((s) => s.id === section.id).title, JSON.stringify(section.json),
         ...(section.thread.length ? ['', '## 이 섹션에서 이어진 대화', ...section.thread.map((x) => (x.type === 'easy' ? '쉬운 설명: ' + x.text : 'Q: ' + x.q + '\nA: ' + x.a))] : [])]
@@ -225,10 +226,7 @@ export function answerPrompt(question, ctx, section) {
     question,
     '',
     '형식: { "text": "답. 필요한 만큼, 보통 2~6문장" }',
-    '',
-    '## 규칙',
-    ...rules(),
-  ].join('\n')
+  ])
 }
 
 // 형식이 틀렸을 때 한 번 더 요청하는 말

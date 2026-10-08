@@ -1,13 +1,13 @@
 import { expect, test } from 'claude-code/testing'
-import { parseAt, sectionPrompt, setLanguage, validate } from '../hooks/generate.js'
+import { joinBlocks, parseAt, sectionPrompt, setLanguage, validate } from '../hooks/generate.js'
 
 const ctx = { text: '## 해설할 턴', hunkCount: 2 }
 
 test('설정 language: 해설 언어 지시가 바뀐다', () => {
   setLanguage('en')
-  expect(sectionPrompt('summary', ctx)).toMatch(/Write every text value in English/)
+  expect(joinBlocks(sectionPrompt('summary', ctx))).toMatch(/Write every text value in English/)
   setLanguage('ko')
-  expect(sectionPrompt('summary', ctx)).toMatch(/한국어로, 짧고 쉬운 문장으로/)
+  expect(joinBlocks(sectionPrompt('summary', ctx))).toMatch(/한국어로, 짧고 쉬운 문장으로/)
 })
 
 test('코드 위치 해석', () => {
@@ -23,4 +23,15 @@ test('검증: 요약의 hunkNotes는 변경 블록 수에 맞춘다, 퀴즈는 �
   const q = validate('quiz', '{"questions":[{"q":"a","options":["1","2"],"explain":""},{"q":"b","options":["1","2","3"],"explain":"e"}]}')
   expect(q).toMatchObject({ ok: true, value: { questions: [{ q: 'b' }] } })
   expect(validate('flow', 'not json')).toMatchObject({ ok: false })
+})
+
+test('같은 턴의 요청은 모두 같은 글로 시작하고 그 부분에 캐시 표시가 있다 (섹션마다 맥락을 다시 사지 않게)', () => {
+  const ctx = { text: '## 이 턴\n사용자: 고쳐줘\n\n@@ 변경 1 a.js', hunkCount: 1 }
+  const a = sectionPrompt('summary', ctx)
+  const b = sectionPrompt('quiz', ctx)
+  expect(a[0]).toEqual(b[0])
+  expect(a[0].cache).toBe(true)
+  expect(a[0].text).toMatch(/@@ 변경 1 a\.js/)
+  expect(a[1].cache).toBeUndefined()
+  expect(a[1].text).not.toEqual(b[1].text)
 })
