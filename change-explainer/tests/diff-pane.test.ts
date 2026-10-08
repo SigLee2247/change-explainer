@@ -42,7 +42,8 @@ test('넓은 창: 좌우 비교로 실제 변경을 그리고, 줄 안에서 바
   expect(await ui.find({ type: 'Text', text: /변경 1\/2/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /src\/login\.ts  4줄/ })).toBeDefined()
   // 줄 안 강조: 바뀐 부분만 배경색이 칠해진 조각
-  const line: any = await ui.find({ type: 'Text', text: /return retry\(\(\) => api\.post\(u\)\)/ })
+  // 코드 줄은 가로 이동 창(pan-diff) 안에 있다
+  const line: any = await ui.find({ type: 'Text', text: /return retry\(\(\) => api\.post\(u\)\)/, in: 'pan-diff' })
   const highlighted = line.children.filter((c: any) => c.props && c.props.backgroundColor === '#2f5a8f').map((c: any) => c.children[0])
   expect(highlighted).toEqual(['retry(() => ', ')'])
 })
@@ -62,8 +63,8 @@ test('좁은 창: 통합 보기로 지운 줄 다음에 추가한 줄', async ($
   const ui = await $.ui.mount(pane(60))
   await openDiff($, ui)
   expect(await ui.find({ type: 'Text', text: /통합 보기/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '− ' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '+ ' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '− ', in: 'pan-diff' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '+ ', in: 'pan-diff' })).toBeDefined()
 })
 
 test('긴 파일은 코드 영역만 j/k로 스크롤하고, 변경으로 이동하면 그 위치로 간다', async ($, on) => {
@@ -83,7 +84,38 @@ test('긴 파일은 코드 영역만 j/k로 스크롤하고, 변경으로 이동
   expect(await ui.find({ type: 'Text', text: /줄 6–12 \/ \d+/ })).toBeDefined()
   await ui.press({ key: 'next' })
   expect(await ui.find({ type: 'Text', text: /변경 2\/2/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: 'LINE 50' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'LINE 50', in: 'pan-diff' })).toBeDefined()
+})
+
+test('긴 줄은 끌거나 ←/→ 로 가로 이동하고, 창의 h/l 버튼과 같은 위치를 쓴다', async ($, on) => {
+  const long = 'const value = ' + 'x'.repeat(200) + ' // END'
+  setup(on, { '/repo/wide.ts': 'a\n' + long + '\n' })
+  quietModel(on)
+  await turnStart($, 't1', '긴 줄 고쳐줘')
+  await edit($, '/repo/wide.ts', 'a\n', 'b\n')
+  await turnEnd($, 't1')
+  await $.command.run({ command: 'explain', args: '' })
+  const ui = await $.ui.mount(pane(120))
+  await openDiff($, ui)
+  await ui.resize({ columns: 120, rows: 10, in: 'pan-diff' })
+  const shown = async () => ((await ui.find({ type: 'Text', text: /const value|x{10}/, in: 'pan-diff' })) as any)?.text as string
+  expect(await shown()).toMatch(/const value/)
+  // 클릭 후 → 키: 8칸씩
+  await ui.key({ key: 'right', in: 'pan-diff' })
+  expect(await shown()).not.toMatch(/const value/)
+  expect(await ui.find({ type: 'Text', text: /가로 \+8/ })).toBeDefined()
+  // 왼쪽으로 끌면 내용이 왼쪽으로 (오른쪽이 보인다)
+  await ui.pointer({ type: 'down', x: 50, y: 1, button: 'left', in: 'pan-diff' })
+  await ui.pointer({ type: 'move', x: 20, y: 1, button: 'left', in: 'pan-diff' })
+  await ui.pointer({ type: 'up', x: 20, y: 1, button: 'left', in: 'pan-diff' })
+  expect(await ui.find({ type: 'Text', text: /가로 \+38/ })).toBeDefined()
+  // 창의 h 버튼은 그 위치에서 이어서
+  await ui.press({ key: 'left' })
+  expect(await ui.find({ type: 'Text', text: /가로 \+30/ })).toBeDefined()
+  // 그 창이 쓰지 않는 키(j)는 창으로 넘어가 코드 영역을 위아래로 민다
+  await ui.key({ key: 'j', in: 'pan-diff' })
+  await ui.key({ key: 'home', in: 'pan-diff' })
+  expect(await shown()).toMatch(/const value/)
 })
 
 test('화면이 없는 곳에서 기록된 변경이 없으면 /explain은 안내만 한다', async ($, on) => {

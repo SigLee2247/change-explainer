@@ -25,6 +25,7 @@ When Claude edits code, the result stays but the reasoning disappears into the c
 
 - **Wait, what?** If a section does not land, press it. Each press explains again in a different way (analogy, premises one by one, numbers, execution order), and you can ask a question about that section.
 - **IntelliJ-style diff** (`d`): side by side on wide panes, unified on narrow ones, changed words highlighted, only the code area scrolls.
+- **Horizontal scrolling.** Wide sequence diagrams, diff lines and code lines scroll sideways: drag them with the mouse, or click and use ←/→ (`h`/`l`). Esc returns the keys to the pane. Terminals do not pass horizontal wheel or trackpad movement to mods, so dragging stands in for it.
 - **Past work** (`/explain-list`): Claude Code keeps every conversation of a project. The list shows every past turn that changed something, newest first, one line each, titled by its commit message (or the files it changed). Open one to explain it. Sessions are read in the background and indexed, so the list opens at once the next time. Edit/Write changes come from the conversation record (exact), Bash changes from the commits you made in that turn's time window. Nothing to configure: no repository paths, no base branches.
 - **Token usage.** Every explanation records the tokens it used (input, cache reads, output). The pane shows the turn's total; the list shows the total for the repository.
 - **Remembers what you learned.** Terms you know and sections you got stuck on are saved per repository and shape later explanations.
@@ -94,7 +95,7 @@ Set them with `/plugin configure change-explainer@change-explainer`, or pass `--
 
 ```bash
 claude --plugin-dir ./change-explainer          # load with hot reload
-cd change-explainer && claude plugin test       # 51 tests, no session or network needed
+cd change-explainer && claude plugin test       # 52 tests, no session or network needed
 claude plugin validate ./change-explainer --strict
 claude plugin validate .                        # the marketplace file
 ```

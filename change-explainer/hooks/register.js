@@ -530,7 +530,7 @@ async function openTurn($, rec, at) {
   let usage = emptyUsage()
   const savedUsage = await readOrNull($, view.dir + '/views/usage.json')
   try { if (savedUsage) usage = { ...usage, ...JSON.parse(savedUsage) } } catch {}
-  ex = { dir: view.dir, sections, open, current: 'summary', threads, qa, quiz, seqLeft: 0, understood, usage }
+  ex = { dir: view.dir, sections, open, current: 'summary', threads, qa, quiz, seqLeft: 0, pans: {}, understood, usage }
   mode = 'explain'
   pos = 0
   diffTop = 0
@@ -1036,6 +1036,26 @@ export function register(on, opts) {
     }
   })
 
+  // 가로 이동 창(views/pan.js)이 보내는 것: 끌거나 ←/→ 로 옮긴 위치, 그리고 그 창이 쓰지 않는 키
+  // (창을 클릭하면 키가 그 창으로 가므로, diff의 위아래 이동 키는 여기서 이어 받는다)
+  on('ui.message', { requestId: PANE }, async ($, e, next) => {
+    const d = e.data || {}
+    if (typeof d.pan !== 'string') return next(e)
+    if (typeof d.left === 'number') {
+      if (d.pan === 'diff') diffLeft = d.left
+      else if (ex && d.pan === 'seq') ex.seqLeft = d.left
+      else if (ex) ex.pans = { ...ex.pans, [d.pan]: d.left }
+      $.ui.invalidate('ui.render')
+      return {}
+    }
+    const by = { j: 1, down: 1, k: -1, up: -1, pagedown: 4, pageup: -4 }[d.key]
+    if (mode === 'diff' && by) {
+      diffTop = Math.max(0, Math.min(diffMaxTop, diffTop + by * STEP_ROWS))
+      $.ui.invalidate('ui.render')
+    }
+    return {}
+  }).catch(passThrough)
+
   // diff 창에서는 휠과 스크롤 키로 창 전체가 아니라 코드 영역만 움직인다
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
     if (!view || mode !== 'diff') return next(e)
@@ -1116,7 +1136,6 @@ export function register(on, opts) {
       const m = diffModel(cols, view.files, pos)
       diffMaxTop = Math.max(0, m.lines.length - diffCodeRows(bodyRows))
       diffTop = Math.min(diffTop, diffMaxTop)
-      diffLeft = Math.min(diffLeft, m.maxLeft)
       const summary = ex && ex.sections.summary.status === 'done' ? ex.sections.summary.data : null
       return diffView(el, cols, bodyRows, { turn: view.turn, files: view.files, pos, top: diffTop, left: diffLeft, notes: summary ? summary.hunkNotes : null }, {
         prev: () => goTo(pos - 1),
@@ -1126,7 +1145,7 @@ export function register(on, opts) {
         up: () => { diffTop = Math.max(0, diffTop - STEP_ROWS); redraw() },
         down: () => { diffTop = Math.min(diffMaxTop, diffTop + STEP_ROWS); redraw() },
         leftward: () => { diffLeft = Math.max(0, diffLeft - STEP_COLS); redraw() },
-        rightward: () => { diffLeft = Math.min(m.maxLeft, diffLeft + STEP_COLS); redraw() },
+        rightward: () => { diffLeft = Math.min(Math.max(m.maxLeft, diffLeft), diffLeft + STEP_COLS); redraw() },
         back: () => { mode = 'explain'; redraw() },
       })
     }

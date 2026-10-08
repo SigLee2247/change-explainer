@@ -32,10 +32,6 @@ function segments(text, ranges, hi, fg) {
   return out
 }
 
-function codeLine(el, mark, num, parts, left) {
-  return rich(el, [[mark, C.accent, true], [String(num).padStart(4, ' ') + ' ', C.faint], ...shift(parts, left)], { wrap: 'truncate-end' })
-}
-
 function filled(el, width, bg, child) {
   const props = { width, flexShrink: 0, children: [child] }
   if (bg) props.backgroundColor = bg
@@ -179,22 +175,22 @@ export function diffView(el, cols, bodyRows, st, on) {
         ],
       }))
     }
-    m.lines.slice(top, top + codeRows).forEach((ln) => {
-      if (ln.fold) {
-        code.push(el.Box({ justifyContent: 'center', children: [el.Text({ color: C.faint, children: ['··· 변경 없는 ' + ln.fold + '줄 ···'] })] }))
-      } else if (m.side) {
-        code.push(el.Box({
-          flexDirection: 'row',
-          children: [
-            filled(el, half, ln.l.bg, codeLine(el, ln.mark, ln.l.num, ln.l.parts, left)),
-            el.Text({ color: C.rule, children: ['│'] }),
-            filled(el, half, ln.r.bg, codeLine(el, ln.mark, ln.r.num, ln.r.parts, left)),
+    // 코드 줄은 끌거나 ←/→ 로 가로 이동하는 창(pan.js)에 담는다. 위아래는 여기서 잘라 넘긴다
+    const fixed = (mark, num) => [[mark, C.accent, true], [String(num).padStart(4, ' ') + ' ', C.faint]]
+    const rows = m.lines.slice(top, top + codeRows).map((ln) => {
+      if (ln.fold) return { center: ['··· 변경 없는 ' + ln.fold + '줄 ···', C.faint] }
+      if (m.side) {
+        return {
+          segs: [
+            { fixed: fixed(ln.mark, ln.l.num), parts: ln.l.parts, bg: ln.l.bg },
+            { fixed: fixed(ln.mark, ln.r.num), parts: ln.r.parts, bg: ln.r.bg },
           ],
-        }))
-      } else {
-        code.push(filled(el, cols, ln.bg, codeLine(el, ln.mark, ln.num, ln.parts, left)))
+          sep: C.rule,
+        }
       }
+      return { segs: [{ fixed: fixed(ln.mark, ln.num), parts: ln.parts, bg: ln.bg }] }
     })
+    code.push(el.Client({ key: 'pan-diff', module: './pan.js', width: cols, props: { id: 'diff', left: st.left, rows } }))
   }
 
   // 아래쪽: 지금 보고 있는 변경의 위치. 변경별 한 줄 해설은 해설 생성 단계에서 붙는다

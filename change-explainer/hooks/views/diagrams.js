@@ -90,6 +90,7 @@ export function seqMaxLeft(data, cols) {
   return Math.max(0, geometry(data, cols).longest - (cols - GUTTER))
 }
 
+// 창보다 넓으면 끌거나 ←/→ 로 가로 이동하는 창(pan.js)에 담는다
 export function seqView(el, data, cols, left) {
   const { laneW, center, width } = geometry(data, cols)
   const lifeline = () => {
@@ -97,7 +98,7 @@ export function seqView(el, data, cols, left) {
     data.lanes.forEach((_, i) => { a[center(i)] = '│' })
     return a
   }
-  const row = (gutter, parts) => rich(el, [[gutter, C.accent, true], ...shift(parts, left)], { wrap: 'truncate-end' })
+  const row = (gutter, parts) => ({ segs: [{ fixed: [[gutter, C.accent, true]], parts }] })
   const paint = (cells, start, end, color) => [
     [cells.slice(0, start).join(''), C.faint],
     [cells.slice(start, end).join(''), color],
@@ -142,5 +143,5 @@ export function seqView(el, data, cols, left) {
     if (m.note) rows.push(row('   ', textAt(l + 2, [[m.note, C.dim]])))
   })
   rows.push(row('   ', [[lifeline().join(''), C.faint]]))
-  return el.Box({ flexDirection: 'column', children: rows })
+  return el.Client({ key: 'pan-seq', module: './pan.js', width: cols, props: { id: 'seq', left, rows, hint: C.faint } })
 }

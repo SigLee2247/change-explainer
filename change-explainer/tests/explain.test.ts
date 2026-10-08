@@ -102,7 +102,7 @@ test('섹션은 펼칠 때 만든다: 흐름도는 카드, 코드 따라가기�
   expect(await ui.find({ type: 'Text', text: '성공했나?' })).toBeDefined()
   await ui.press({ key: 'btn-walk' })
   await flush()
-  expect(await ui.find({ type: 'Text', text: /return retry\(\(\) => api\.post\(u\)\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /return retry\(\(\) => api\.post\(u\)\)/, in: 'pan-walk-0' })).toBeDefined()
   expect(calls).toEqual(['fork:요약', 'fork:흐름도', 'fork:코드 따라가기'])
 })
 

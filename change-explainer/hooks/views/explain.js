@@ -5,7 +5,7 @@
 //   sections: { id: { status, data, error } }   status: none | loading | done | error
 //   open: { id: bool }, current,      펼친 섹션, r(다시 만들기)의 대상
 //   threads: { id: [{ type: 'easy', text } | { type: 'q', q, a }] }   Wait, what? 대화 (null이면 만드는 중)
-//   qa: [{ q, a }], known: [용어], quiz: { order, picked }, understood, seqLeft,
+//   qa: [{ q, a }], known: [용어], quiz: { order, picked }, understood, seqLeft, pans: { 'walk-1': 가로 위치 },
 //   codeFor: (at) => { title, lines: [{ num, text }] } | null    코드 위치를 스냅숏에서 읽은 결과
 // }
 
@@ -85,7 +85,7 @@ function backgroundView(el, data) {
   return el.Box({ flexDirection: 'column', rowGap: 1, children })
 }
 
-function walkView(el, data, codeFor) {
+function walkView(el, data, codeFor, width, pans) {
   return el.Box({
     flexDirection: 'column',
     rowGap: 1,
@@ -104,11 +104,21 @@ function walkView(el, data, codeFor) {
                 el.Text({ color: C.blue, wrap: 'truncate-start', children: [st.at || '(위치 없음)'] }),
               ],
             }),
+            // 긴 코드 줄은 끌거나 ←/→ 로 가로 이동
             code
               ? el.Box({
-                  flexDirection: 'column',
                   paddingLeft: 1,
-                  children: code.lines.map((ln) => rich(el, [[String(ln.num).padStart(4, ' ') + ' ┃ ', C.faint], [ln.text, code.deleted ? C.dim : C.fg]], { wrap: 'truncate-end' })),
+                  children: [el.Client({
+                    key: 'pan-walk-' + i,
+                    module: './pan.js',
+                    width: Math.max(20, width - 1),
+                    props: {
+                      id: 'walk-' + i,
+                      left: (pans && pans['walk-' + i]) || 0,
+                      rows: code.lines.map((ln) => ({ segs: [{ fixed: [[String(ln.num).padStart(4, ' ') + ' ┃ ', C.faint]], parts: [[ln.text, code.deleted ? C.dim : C.fg]] }] })),
+                      hint: C.faint,
+                    },
+                  })],
                 })
               : el.Text({ color: C.faint, children: ['  (이 위치의 코드를 스냅숏에서 찾지 못했습니다)'] }),
             labeled(el, '하는 일', C.green, st.does),
@@ -381,7 +391,7 @@ export function explainView(el, cols, st, on) {
     let view
     if (s.id === 'summary') view = summaryView(el, d, changed, on.openDiff)
     else if (s.id === 'background') view = backgroundView(el, d)
-    else if (s.id === 'walk') view = walkView(el, d, st.codeFor)
+    else if (s.id === 'walk') view = walkView(el, d, st.codeFor, inner, st.pans)
     else if (s.id === 'flow') view = flowView(el, d, inner)
     else if (s.id === 'ba') view = baView(el, d)
     else if (s.id === 'impact') view = impactView(el, d)
@@ -389,7 +399,8 @@ export function explainView(el, cols, st, on) {
     else if (s.id === 'quiz') view = quizView(el, d, st.quiz, on)
     else {
       const maxLeft = seqMaxLeft(d, inner)
-      const left = Math.min(st.seqLeft, maxLeft)
+      // 위치는 창(pan.js)이 끌기와 키로도 바꾼다. 버튼의 흐림만 여기서 판단
+      const left = st.seqLeft
       const diagram = seqView(el, d, inner, left)
       view = maxLeft === 0 ? diagram : el.Box({
         flexDirection: 'column',
