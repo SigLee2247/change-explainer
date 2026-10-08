@@ -116,3 +116,44 @@ export function conversationExcerpt(jsonLines, maxChars = 12000, keys = []) {
   }
   return out.join('\n\n')
 }
+
+// ── 실시간 수집: Bash가 건드리는 저장소 ──────────────────────
+
+// Bash 명령에서 디렉토리 후보를 뽑는다: cd 대상, git -C 대상, 절대 경로와 ~/ 경로
+// 상대 경로의 cd는 cwd 기준. 파일 경로는 폴더로(확장자가 있으면). 많아야 8개
+export function commandDirs(command, cwd, home) {
+  const out = new Set()
+  const add = (p) => {
+    if (!p) return
+    let x = p.replace(/^["']|["']$/g, '')
+    if (x.startsWith('~/')) x = home + x.slice(1)
+    else if (x === '~') x = home
+    else if (!x.startsWith('/')) x = cwd.replace(/\/$/, '') + '/' + x
+    x = x.replace(/\/+$/, '')
+    if (/\.[A-Za-z0-9]{1,8}$/.test(x.split('/').pop())) x = x.slice(0, x.lastIndexOf('/'))
+    // 장치·커널 경로와 Claude Code 자체 데이터만 뺀다. 임시 폴더라도 git 저장소면 작업 대상이다
+    // (저장소가 아닌 디렉토리는 git 최상위를 찾는 단계에서 걸러진다)
+    if (/^\/(dev|proc|sys)(\/|$)/.test(x) || x.startsWith(home + '/.claude')) return
+    if (x) out.add(x)
+  }
+  for (const m of command.matchAll(/(?:^|[;&|(]\s*)cd\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/g)) add(m[1])
+  for (const m of command.matchAll(/git\s+-C\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/g)) add(m[1])
+  for (const m of command.matchAll(/(?:^|[\s'"=:(>])((?:\/|~\/)[A-Za-z0-9._~@+\/-]+)/g)) add(m[1])
+  return [...out].slice(0, 8)
+}
+
+// `git status --porcelain` → { dirty: [경로], untracked: [경로] }  (이름 바꾸기는 새 경로)
+export function parseStatus(text) {
+  const dirty = []
+  const untracked = []
+  for (const line of text.split('\n')) {
+    if (line.length < 4) continue
+    const code = line.slice(0, 2)
+    let path = line.slice(3)
+    if (path.includes(' -> ')) path = path.split(' -> ').pop()
+    path = path.replace(/^"|"$/g, '')
+    if (code === '??') untracked.push(path)
+    else dirty.push(path)
+  }
+  return { dirty, untracked }
+}

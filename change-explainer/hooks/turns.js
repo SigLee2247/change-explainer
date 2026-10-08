@@ -47,8 +47,9 @@ export function turnTitle(request, max = 60) {
   return first.length > max ? first.slice(0, max - 1) + '…' : first
 }
 
+// repos: Bash가 건드린 git 저장소의 턴 시작 상태 (register.js의 snapshotRepo)
 export function newTurn(turnId, request, startedAt) {
-  return { turnId, request: request || '', startedAt, files: {} }
+  return { turnId, request: request || '', startedAt, files: {}, repos: {} }
 }
 
 // 턴에서 처음 건드리는 파일의 기록. before가 null이면 새 파일, skipped면 내용을 다루지 않는다

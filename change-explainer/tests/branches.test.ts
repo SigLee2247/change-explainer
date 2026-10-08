@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import {
-  baseCandidates, candidateDirs, conversationExcerpt, parseNameStatus, parseShortstat, parseWorktrees, projectDirName, slug, ticketKey,
+  baseCandidates, candidateDirs, commandDirs, parseStatus, conversationExcerpt, parseNameStatus, parseShortstat, parseWorktrees, projectDirName, slug, ticketKey,
 } from '../hooks/branches.js'
 
 test('대화 기록 폴더 이름', () => {
@@ -83,4 +83,14 @@ test('대화 발췌: 작업이 언급된 구간만 (그 앞의 요청부터 다�
   expect(conversationExcerpt(lines, 12000, ['/w/wt-SHOP-217', 'feature/SHOP-217', 'SHOP-217'])).toBe(
     '[2026-10-02 02:00] 사용자: SHOP-217 사이트맵 대상 바꿔줘\n\n[2026-10-02 02:05] Claude: 노출 상품만 대상으로 바꿨습니다.',
   )
+})
+
+test('Bash 명령에서 건드리는 디렉토리 후보', () => {
+  expect(commandDirs('cd /w/wt-SHOP-1 && sed -i s/a/b/ src/A.java && git commit -m x', '/h', '/Users/u')).toEqual(['/w/wt-SHOP-1'])
+  expect(commandDirs('git -C ~/p/api status', '/h', '/Users/u')).toEqual(['/Users/u/p/api'])
+  expect(commandDirs('cat > /w/api/src/New.java <<EOF', '/h', '/Users/u')).toEqual(['/w/api/src'])
+  expect(commandDirs('cd sub && ls', '/h', '/Users/u')).toEqual(['/h/sub'])
+  expect(commandDirs('cat /dev/null; ls ~/.claude/projects', '/h', '/Users/u')).toEqual([])
+  expect(commandDirs('cd /private/tmp/demo-repo && git status', '/h', '/Users/u')).toEqual(['/private/tmp/demo-repo'])
+  expect(parseStatus(' M src/A.java\nA  src/B.java\nR  old.java -> new.java\n?? notes.md\n')).toEqual({ dirty: ['src/A.java', 'src/B.java', 'new.java'], untracked: ['notes.md'] })
 })

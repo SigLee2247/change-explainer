@@ -3,6 +3,8 @@
 // 1단계: 변경 수집과 저장 / 2단계: diff 창 / 3단계: 해설 생성과 해설 창 / 4단계: 작업 목록(이 세션의 턴, 브랜치 작업)
 // - 턴에서 파일을 처음 건드리기 직전의 내용(변경 전)과 턴이 끝난 뒤의 내용(변경 후)을 남긴다
 // - 서브에이전트의 수정은 그 서브에이전트를 실행한 메인 턴에 붙인다
+// - Bash로 바꾼 파일도 잡는다: Bash가 건드리는 git 저장소의 상태를 턴에서 처음 건드릴 때 남기고,
+//   턴이 끝나면 지금 상태와 비교한다 (커밋, 수정, 새 파일, 삭제. 턴 전부터 있던 수정은 뺀다)
 // - 도구 호출은 관찰만 한다. 막거나 바꾸지 않고 next(e)의 결과를 그대로 돌려준다
 //
 // 저장 위치: ~/.claude/explanations/<저장소>-<해시>/<세션 id>/
@@ -13,7 +15,7 @@
 // 저장소 단위: ~/.claude/explanations/<저장소>-<해시>/learning.json   Known 용어, 막혔던 섹션
 // 브랜치 작업:  ~/.claude/explanations/<워크트리>-<해시>/branches/<브랜치>/   턴과 같은 형식
 
-import { baseCandidates, candidateDirs, conversationExcerpt, parseNameStatus, parseShortstat, parseWorktrees, projectDirName, slug, ticketKey } from './branches.js'
+import { baseCandidates, candidateDirs, commandDirs, parseStatus, conversationExcerpt, parseNameStatus, parseShortstat, parseWorktrees, projectDirName, slug, ticketKey } from './branches.js'
 import { buildRows } from './diff.js'
 import { SECTIONS, answerPrompt, easyPrompt, parseAt, retryPrompt, sectionPrompt, turnContext, validate } from './generate.js'
 import { diffCodeRows, diffModel, diffView, hunkList } from './views/diff.js'
@@ -168,6 +170,109 @@ async function saveTurn($, turnId) {
   c.session = { ...c.session, turns: [...others, summary].sort((a, b) => a.seq - b.seq) }
   await $.fs.write(c.base + '/session.json', JSON.stringify(c.session, null, 2))
   lastRecord = record
+}
+
+// ── Bash로 바꾼 파일 잡기 ────────────────────────────────────
+
+// 한 턴에서 처음 기록할 때 미리 읽어 둘 파일 수 (턴 전부터 수정돼 있거나 추적 안 되는 파일)
+const MAX_SNAPSHOT_FILES = 300
+// 한 저장소에서 한 턴에 기록할 변경 파일 수
+const MAX_BASH_FILES = 80
+
+// 디렉토리 → git 최상위 ('' 이면 저장소가 아님). 세션 동안 기억한다
+let topCache = {}
+
+async function topOf($, dir) {
+  if (dir in topCache) return topCache[dir]
+  let top = ''
+  try {
+    if (await $.fs.exists(dir)) {
+      const r = await git($, dir, ['rev-parse', '--show-toplevel'])
+      top = r.ok ? r.out.trim() : ''
+    }
+  } catch {}
+  topCache[dir] = top
+  return top
+}
+
+// 파일을 저장할 때 쓸 상대 경로: 세션 저장소 안이면 그대로, 다른 저장소면 "저장소이름/경로", 아니면 _outside
+function relFor(c, abs) {
+  const base = c.root.replace(/\/$/, '') + '/'
+  if (abs.startsWith(base)) return abs.slice(base.length)
+  const top = Object.values(topCache).filter((t) => t && abs.startsWith(t + '/')).sort((a, b) => b.length - a.length)[0]
+  if (top) return top.split('/').pop() + '/' + abs.slice(top.length + 1)
+  return storedPath(abs, c.root)
+}
+
+// 저장소의 지금 상태: HEAD, 그리고 이미 수정돼 있거나 추적 안 되는 파일의 내용 (턴 전부터 있던 변경을 빼려고)
+async function snapshotRepo($, top) {
+  const head = await git($, top, ['rev-parse', 'HEAD'])
+  if (!head.ok) return null
+  const st = parseStatus((await git($, top, ['status', '--porcelain'])).out)
+  const read = async (paths) => {
+    const out = {}
+    for (const p of paths.slice(0, MAX_SNAPSHOT_FILES)) out[p] = await readSnapshot($, top + '/' + p)
+    return out
+  }
+  return { top, point: head.out.trim(), dirtyBefore: await read(st.dirty), untrackedBefore: await read(st.untracked), agents: [] }
+}
+
+// Bash 명령이 건드릴 저장소들을 찾아, 이 턴에서 처음이면 상태를 남긴다. 건드린 저장소 목록을 돌려준다
+async function trackBashRepos($, turn, command, agent) {
+  const c = await ensureCtx($)
+  const home = await $.env.get('HOME')
+  const tops = []
+  for (const dir of [c.cwd, ...commandDirs(command, c.cwd, home)]) {
+    const top = await topOf($, dir)
+    if (!top || tops.includes(top)) continue
+    tops.push(top)
+    if (!(top in turn.repos)) turn.repos[top] = await snapshotRepo($, top)
+    const repo = turn.repos[top]
+    if (repo && agent && !repo.agents.some((a) => a.agentId === agent.agentId)) repo.agents.push(agent)
+  }
+  return tops
+}
+
+const asText = (v) => (typeof v === 'string' ? v : null)
+const skippedOf = (v) => (v && typeof v === 'object' ? v.skipped : null)
+
+// 턴 시작 상태와 지금을 비교해 바뀐 파일을 턴 기록에 넣는다. Edit/Write로 이미 잡은 파일은 그대로 둔다
+async function finalizeRepo($, turn, top) {
+  const repo = turn.repos[top]
+  if (!repo) return
+  const c = await ensureCtx($)
+  const changed = new Map()
+  for (const ch of parseNameStatus((await git($, top, ['diff', '--name-status', '-M', repo.point])).out)) changed.set(ch.path, ch.from)
+  for (const p of parseStatus((await git($, top, ['status', '--porcelain'])).out).untracked) if (!changed.has(p)) changed.set(p, null)
+  for (const p of [...Object.keys(repo.dirtyBefore), ...Object.keys(repo.untrackedBefore)]) if (!changed.has(p)) changed.set(p, null)
+
+  let count = 0
+  for (const [path, from] of changed) {
+    if (count >= MAX_BASH_FILES) break
+    const abs = top + '/' + path
+    const existing = turn.files[abs]
+    if (existing && !existing.fromBash) continue
+    let before
+    if (existing) before = existing.skipped ? { skipped: existing.skipped } : existing.before
+    else if (path in repo.dirtyBefore) before = repo.dirtyBefore[path]
+    else if (path in repo.untrackedBefore) before = repo.untrackedBefore[path]
+    else {
+      const show = await git($, top, ['show', repo.point + ':' + (from || path)])
+      before = show.ok ? (looksBinary(show.out) ? { skipped: 'binary' } : show.out) : null
+    }
+    const after = await readSnapshot($, abs)
+    const skipped = skippedOf(before) || skippedOf(after)
+    // 이번 턴에 바뀌지 않은 파일 (턴 전부터 수정돼 있던 것 포함)
+    if (!skipped && asText(before) === asText(after)) {
+      if (existing) delete turn.files[abs]
+      continue
+    }
+    let entry = newFileEntry(abs, relFor(c, abs), skipped ? undefined : asText(before), skipped)
+    entry.fromBash = true
+    for (const a of repo.agents.length ? repo.agents : [null]) entry = recordEdit(entry, 'Bash', a)
+    turn.files[abs] = { ...entry, fromBash: true }
+    count++
+  }
 }
 
 // ── 창에 띄울 턴 불러오기 ────────────────────────────────────
@@ -684,7 +789,8 @@ export function register(on, opts) {
       if (!turn.files[abs]) {
         const before = await readSnapshot($, abs)
         const skipped = before && typeof before === 'object' ? before.skipped : null
-        turn.files[abs] = newFileEntry(abs, storedPath(abs, c.root), skipped ? undefined : before, skipped)
+        await topOf($, abs.slice(0, abs.lastIndexOf('/')) || '/')
+        turn.files[abs] = newFileEntry(abs, relFor(c, abs), skipped ? undefined : before, skipped)
       }
     } catch {
       abs = null
@@ -699,6 +805,25 @@ export function register(on, opts) {
       if (finished[turnId]) {
         try { await saveTurn($, turnId) } catch (err) { $.ui.log('턴 기록 갱신 실패: ' + err) }
       }
+    }
+    return result
+  }).catch(passThrough)
+
+  // Bash: 실행 전에 건드릴 저장소의 상태를 남긴다 (턴마다 저장소당 한 번)
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const turnId = e.agentId ? agentTurn[e.agentId] : current && current.turnId
+    const turn = !turnId ? null : current && current.turnId === turnId ? current : finished[turnId] && finished[turnId].turn
+    if (!turn || typeof e.command !== 'string') return next(e)
+    const agent = e.agentId ? { agentId: e.agentId, type: agentType[e.agentId] || null } : null
+    let tops = []
+    try { tops = await trackBashRepos($, turn, e.command, agent) } catch (err) { $.ui.log('저장소 상태 기록 실패: ' + err) }
+    const result = await next(e)
+    // 메인 턴이 이미 끝난 뒤의 명령(백그라운드 서브에이전트)이면 그 저장소를 다시 비교해 저장한다
+    if (finished[turnId] && tops.length) {
+      try {
+        for (const top of tops) await finalizeRepo($, turn, top)
+        await saveTurn($, turnId)
+      } catch (err) { $.ui.log('턴 기록 갱신 실패: ' + err) }
     }
     return result
   }).catch(passThrough)
@@ -721,6 +846,10 @@ export function register(on, opts) {
       const keep = {}
       ids.slice(-KEEP_FINISHED).forEach((id) => { keep[id] = finished[id] })
       finished = keep
+    }
+    // Bash가 건드린 저장소: 턴 시작 상태와 지금을 비교해 바뀐 파일을 넣는다
+    for (const top of Object.keys(turn.repos)) {
+      try { await finalizeRepo($, turn, top) } catch (err) { $.ui.log('Bash 변경 비교 실패: ' + top + ': ' + err) }
     }
     if (Object.keys(turn.files).length) {
       try { await saveTurn($, turn.turnId) } catch (err) { $.ui.log('턴 기록 저장 실패: ' + err) }
