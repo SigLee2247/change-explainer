@@ -41,16 +41,16 @@ When Claude edits code, the result stays but the reasoning disappears into the c
 From a shell:
 
 ```bash
-claude plugin marketplace add <owner>/<repo>      # this repository on GitHub, or its git URL
+claude plugin marketplace add SigLee2247/change-explainer
 claude plugin install change-explainer@change-explainer
 ```
 
-Or inside Claude Code: `/plugin marketplace add <owner>/<repo>`, then `/plugin install change-explainer@change-explainer`.
+Or inside Claude Code: `/plugin marketplace add SigLee2247/change-explainer`, then `/plugin install change-explainer@change-explainer`.
 
 To try it from a clone without installing:
 
 ```bash
-git clone <repo-url> change-explainer-repo
+git clone https://github.com/SigLee2247/change-explainer change-explainer-repo
 claude --plugin-dir ./change-explainer-repo/change-explainer
 ```
 
@@ -103,6 +103,10 @@ claude plugin validate .                        # the marketplace file
 - `SPEC.md` (Korean) records the design and the decisions behind it.
 - `samples/explain-preview` is a fixed-data mod for checking the pane's design; `samples/try-change-explainer.sh` builds a demo repository and starts Claude Code with the mod.
 
+## License
+
+MIT. See [LICENSE](LICENSE).
+
 ---
 
 ## 한국어
@@ -112,11 +116,11 @@ Claude Code가 턴마다 바꾼 코드를 기록하고, **무엇을 왜 어떻�
 **설치**
 
 ```bash
-claude plugin marketplace add <owner>/<repo>
+claude plugin marketplace add SigLee2247/change-explainer
 claude plugin install change-explainer@change-explainer
 ```
 
-설치 없이 써 보려면 저장소를 받은 뒤 `claude --plugin-dir ./<저장소>/change-explainer`로 시작하세요. Claude Code 2.1.287 이상이 필요합니다.
+설치 없이 써 보려면 저장소를 받은 뒤 `claude --plugin-dir ./change-explainer/change-explainer`로 시작하세요. Claude Code 2.1.287 이상이 필요합니다.
 
 **사용**
 

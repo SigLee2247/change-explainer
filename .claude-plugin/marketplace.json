@@ -6,7 +6,7 @@
     {
       "name": "change-explainer",
       "source": "./change-explainer",
-      "description": "Explains each turn's changes (summary, code walkthrough, diagrams, IntelliJ-style diff, quiz) and lists past work per branch"
+      "description": "Explains each turn's changes (summary, code walkthrough, diagrams, IntelliJ-style diff, quiz) and explains past sessions"
     }
   ]
 }

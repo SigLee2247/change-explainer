@@ -1,10 +1,13 @@
 {
   "name": "change-explainer",
   "version": "0.1.0",
-  "description": "Explains what Claude changed in each turn, and why: summary, code walkthrough, flow and sequence diagrams, IntelliJ-style diff, quiz. Also lists past work per branch. 변경 해설 mod.",
+  "description": "Explains what Claude changed in each turn, and why: summary, code walkthrough, flow and sequence diagrams, IntelliJ-style diff, quiz. Also explains past sessions. 변경 해설 mod.",
   "author": {
     "name": "siglee"
   },
+  "license": "MIT",
+  "repository": "https://github.com/SigLee2247/change-explainer",
+  "homepage": "https://github.com/SigLee2247/change-explainer",
   "keywords": [
     "mod",
     "explain",
