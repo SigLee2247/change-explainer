@@ -54,7 +54,7 @@ git clone https://github.com/SigLee2247/change-explainer change-explainer-repo
 claude --plugin-dir ./change-explainer-repo/change-explainer
 ```
 
-After installing, run `/plugin` and check that `change-explainer` is listed as active. The install may say that 5 options are not set yet; every option has a default, so it works without setting them.
+After installing, run `/plugin` and check that `change-explainer` is listed as active. The install may say that 3 options are not set yet; every option has a default, so it works without setting them.
 
 ## Use
 
