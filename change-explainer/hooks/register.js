@@ -600,7 +600,7 @@ async function listSessions($) {
   for (const f of files) {
     const s = scan[f.name]
     if (!s || !s.changed || !s.title) continue
-    out.push({ id: f.name.slice(0, -6), title: s.title, at: localDay(f.mtimeMs), size: f.size, turns: null, status: 'idle' })
+    out.push({ id: f.name.slice(0, -6), title: s.title, mtimeMs: f.mtimeMs, size: f.size })
     if (out.length >= MAX_SESSIONS) break
   }
   return out
@@ -717,7 +717,39 @@ async function reconstructTurn($, sessionId, t) {
   return { record, dir }
 }
 
-// 작업 목록을 만든다: 이 세션의 턴(기록) + 지난 세션(펼치면 턴을 복원)
+// 지난 세션 하나의 "바뀐 턴" 목록. 대화 기록 파일이 그대로면 저장해 둔 것을 쓴다
+const PAST_INDEX_VERSION = 1
+async function sessionItems($, ses) {
+  const c = await ensureCtx($)
+  const file = c.repoBase + '/past-index/' + ses.id + '.json'
+  let items = null
+  const saved = await readOrNull($, file)
+  if (saved) {
+    try {
+      const x = JSON.parse(saved)
+      if (x.v === PAST_INDEX_VERSION && x.mtimeMs === ses.mtimeMs && x.size === ses.size) items = x.items
+    } catch {}
+  }
+  if (!items) {
+    items = (await loadSessionTurns($, ses.id)).map((t) => ({
+      sessionId: ses.id,
+      id: t.id,
+      seq: t.seq,
+      request: t.request.split('\n')[0].slice(0, 80),
+      startAt: t.startAt,
+      at: localDay(Date.parse(t.startAt)),
+      subjects: t.subjects,
+      fileNames: t.fileNames,
+      files: t.files,
+      commits: t.commits,
+    }))
+    await saveJson($, file, { v: PAST_INDEX_VERSION, mtimeMs: ses.mtimeMs, size: ses.size, items })
+  }
+  for (const t of items) t.understood = await readUnderstood($, c.repoBase + '/' + ses.id + '/turns/' + pad(t.seq) + '-h-' + t.id)
+  return items
+}
+
+// 작업 목록을 만든다: 이 세션의 턴(기록) + 지난 작업(지난 세션들의 바뀐 턴, 최근 것부터. 세션을 하나씩 읽으며 채운다)
 async function loadList($) {
   const c = await ensureCtx($)
   if (!repoUsage) {
@@ -726,23 +758,17 @@ async function loadList($) {
   }
   const turns = []
   for (const t of c.session.turns) turns.push({ ...t, understood: t.understood || (await readUnderstood($, turnDir(c, t))) })
-  list = { status: 'loading', progress: '지난 세션을 찾는 중…', turns, sessions: [], usage: repoUsage, error: '' }
+  list = { status: 'loading', progress: '지난 세션을 찾는 중…', turns, past: [], usage: repoUsage, error: '' }
   $.ui.invalidate('ui.render')
-  list = { ...list, sessions: await listSessions($), status: 'done', progress: '' }
-  $.ui.invalidate('ui.render')
-}
-
-// 지난 세션 하나를 펼친다: 턴을 복원하고, 이미 해설한 턴이면 이해 여부를 표시
-async function expandSession($, sessionId) {
-  const c = await ensureCtx($)
-  const set = (patch) => {
-    list = { ...list, sessions: list.sessions.map((x) => (x.id === sessionId ? { ...x, ...patch } : x)) }
+  const sessions = await listSessions($)
+  for (let i = 0; i < sessions.length; i++) {
+    list = { ...list, progress: '지난 작업을 불러오는 중 ' + i + '/' + sessions.length + ' 세션…' }
     $.ui.invalidate('ui.render')
+    const items = await sessionItems($, sessions[i])
+    list = { ...list, past: [...list.past, ...items].sort((a, b) => (b.startAt > a.startAt ? 1 : b.startAt < a.startAt ? -1 : 0)) }
   }
-  set({ status: 'loading' })
-  const turns = await loadSessionTurns($, sessionId)
-  for (const t of turns) t.understood = await readUnderstood($, c.repoBase + '/' + sessionId + '/turns/' + pad(t.seq) + '-h-' + t.id)
-  set({ status: 'open', turns })
+  list = { ...list, status: 'done', progress: '' }
+  $.ui.invalidate('ui.render')
 }
 
 // ── 훅 ─────────────────────────────────────────────────────
@@ -909,15 +935,11 @@ export function register(on, opts) {
         await loadList($)
         const lines = []
         for (const t of list.turns) lines.push('#' + t.seq + '  ' + t.title + '  파일 ' + t.files + '  +' + t.added + ' −' + t.removed)
-        for (const ses of list.sessions) {
-          const turns = await loadSessionTurns($, ses.id)
-          if (!turns.length) continue
-          lines.push('', ses.at + '  ' + ses.title + '  [' + ses.id.slice(0, 8) + ']')
-          for (const t of turns) {
-            lines.push('  #' + t.seq + '  ' + t.request.split('\n')[0].slice(0, 60))
-            for (const subject of t.subjects) lines.push('      커밋: ' + subject)
-            if (t.fileNames.length) lines.push('      파일: ' + t.fileNames.join(', '))
-          }
+        if (list.past.length) lines.push('', '지난 작업')
+        for (const t of list.past) {
+          lines.push('', t.at + '  ' + t.request.slice(0, 60) + '  [' + t.sessionId.slice(0, 8) + '/' + t.seq + ']')
+          for (const subject of t.subjects) lines.push('    커밋: ' + subject)
+          if (t.fileNames.length) lines.push('    파일: ' + t.fileNames.join(', '))
         }
         const u = list.usage
         lines.push('', '해설에 쓴 토큰 (이 저장소 누적): 호출 ' + u.calls + '회, 입력 ' + u.input + ' (캐시 읽기 ' + u.cacheRead + ', 캐시 쓰기 ' + u.cacheWrite + '), 출력 ' + u.output)
@@ -962,8 +984,7 @@ export function register(on, opts) {
     if (target) {
       // 지난 세션의 턴: "<세션 id 앞부분>/<턴 번호>"
       const [prefix, num] = target.split('/')
-      await loadList($)
-      const ses = list.sessions.find((x) => x.id.startsWith(prefix))
+      const ses = (await listSessions($)).find((x) => x.id.startsWith(prefix))
       if (!ses) return { text: '세션을 찾지 못했습니다: ' + prefix }
       const turns = await loadSessionTurns($, ses.id)
       const t = num ? turns.find((x) => String(x.seq) === num) : turns[turns.length - 1]
@@ -1017,29 +1038,20 @@ export function register(on, opts) {
           $.ui.invalidate('ui.render')
           $.ui.scroll({ in: PANE, to: 'start' }).catch(() => {})
         },
-        toggleSession: (ses) => {
-          if (ses.status === 'open') {
-            list = { ...list, sessions: list.sessions.map((x) => (x.id === ses.id ? { ...x, status: 'idle' } : x)) }
-            $.ui.invalidate('ui.render')
-            return
-          }
-          if (ses.turns) {
-            list = { ...list, sessions: list.sessions.map((x) => (x.id === ses.id ? { ...x, status: 'open' } : x)) }
-            $.ui.invalidate('ui.render')
-            return
-          }
-          expandSession($, ses.id).catch(failedList)
-        },
-        openPast: async (ses, t) => {
-          list = { ...list, progress: '#' + t.seq + ' 턴을 대화 기록과 git에서 복원하는 중…', status: 'loading' }
+        openPast: async (item) => {
+          if (list.opening) return
+          const prev = list.progress
+          list = { ...list, opening: true, progress: '대화 기록과 git에서 그 턴을 복원하는 중…' }
           $.ui.invalidate('ui.render')
           try {
-            const { record, dir } = await reconstructTurn($, ses.id, t)
+            const t = (await loadSessionTurns($, item.sessionId)).find((x) => x.id === item.id)
+            if (!t) throw new Error('대화 기록에서 그 턴을 찾지 못했습니다')
+            const { record, dir } = await reconstructTurn($, item.sessionId, t)
             await openTurn($, record, dir)
           } catch (err) {
             list = { ...list, error: '복원하지 못했습니다: ' + err }
           }
-          list = { ...list, status: 'done', progress: '' }
+          list = { ...list, opening: false, progress: list.status === 'loading' ? prev : '' }
           $.ui.invalidate('ui.render')
           $.ui.scroll({ in: PANE, to: 'start' }).catch(() => {})
         },

@@ -1,5 +1,4 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { localDay } from '../hooks/history.js'
 
 // 지난 세션 s1: 첫 턴에서 Bash로 /w/api를 고치고 커밋, 둘째 턴은 질문만
 const J = (o: any) => JSON.stringify(o)
@@ -11,11 +10,15 @@ const TRANSCRIPT = [
   J({ type: 'assistant', timestamp: '2026-10-02T02:00:10Z', message: { content: [{ type: 'text', text: '요청하신 값입니다.' }] } }),
 ].join('\n')
 
+// 대화 기록을 통째로 읽은 횟수 (저장해 둔 목록을 쓰는지 확인)
+const reads = { transcript: 0 }
+
 function run(argv: string[]): { exitCode: number; stdout: string } {
   if (argv[0] === 'sh') {
     const script = argv[2]
     // 세션 훑기: s1은 바꾼 흔적이 있고, quiet는 대화만 했다
     if (script.includes('@@CHANGED')) return { exitCode: 0, stdout: argv.slice(4).map((f) => '@@F ' + f + '\n' + (f.endsWith('/s1.jsonl') ? '@@CHANGED\n' + TRANSCRIPT.split('\n')[0] : J({ type: 'user', message: { content: '이건 뭐야?' } }))).join('\n') + '\n' }
+    if (script.includes('originalFile') && script.includes('tool_result')) reads.transcript++
     if (script.includes('originalFile') && script.includes('tool_result')) return { exitCode: 0, stdout: TRANSCRIPT + '\n' }
     return { exitCode: 0, stdout: '' }
   }
@@ -42,6 +45,7 @@ const SUMMARY = { tldr: '상한을 100에서 200으로 올렸습니다.', files:
 function setup(on: any) {
   const writes = new Map<string, string>()
   const prompts: string[] = []
+  reads.transcript = 0
   mock.clock(on, { now: 1000 })
   on('env.get', () => ({ value: '/home/u' }))
   on('session.cwd', () => ({ value: '/work/harness' }))
@@ -69,7 +73,7 @@ function setup(on: any) {
     prompts.push(e.prompt)
     return { value: { isAnswered: true, text: JSON.stringify(SUMMARY), usage: { input_tokens: 1200, output_tokens: 300, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }
   })
-  return { writes, prompts }
+  return { writes, prompts, reads }
 }
 
 const pane = () => ({
@@ -78,21 +82,24 @@ const pane = () => ({
   props: { title: '변경 해설', isFocused: true, bodyColumns: 110, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
 }) as any
 
-const flush = () => new Promise((r) => setTimeout(r, 30))
+const flush = () => new Promise((r) => setTimeout(r, 200))
 
-test('지난 세션은 바꾼 것이 있는 세션만 마지막으로 쓴 시각과 함께 보이고, 펼치면 바꾼 턴을 커밋 메시지와 함께 보여 준다', async ($, on) => {
-  setup(on)
+test('지난 작업은 바뀐 턴 한 줄씩, 커밋 메시지를 제목으로 보여 준다. 지금 세션과 바꾼 것 없는 세션은 빠진다', async ($, on) => {
+  const { prompts, reads } = setup(on)
   await $.command.run({ command: 'explain', args: 'list' })
   await flush()
   const ui = await $.ui.mount(pane())
-  expect(await ui.find({ key: 'ses-s1' })).toMatchObject({ props: { label: '▸ ' + localDay(S1_MTIME) + '  SHOP-1 상한을 200으로 고쳐줘' } })
-  expect(await ui.find({ key: 'ses-now' })).toBeUndefined()
-  expect(await ui.find({ key: 'ses-quiet' })).toBeUndefined()
-  await ui.press({ key: 'ses-s1' })
-  await flush()
-  expect(await ui.find({ key: 'past-u1' })).toMatchObject({ props: { label: '#1  SHOP-1 상한을 200으로 고쳐줘' } })
+  expect(await ui.find({ key: 'past-u1' })).toMatchObject({ props: { label: 'fix(SHOP-1): 상한 200' } })
+  expect(await ui.find({ type: 'Text', text: /SHOP-1 상한을 200으로 고쳐줘/ })).toBeDefined()
+  // 질문만 한 턴은 없다
   expect(await ui.find({ key: 'past-u2' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /커밋  fix\(SHOP-1\): 상한 200/ })).toBeDefined()
+  expect(prompts.length).toBe(0)
+  // 다시 찾으면 대화 기록이 그대로인 세션은 저장해 둔 목록을 쓴다
+  expect(reads.transcript).toBe(1)
+  await ui.press({ key: 'refresh' })
+  await flush()
+  expect(reads.transcript).toBe(1)
+  expect(await ui.find({ key: 'past-u1' })).toBeDefined()
 })
 
 test('지난 턴을 열면 그 시간대의 내 커밋에서 변경을 복원하고, 그 턴의 대화로 해설하며 토큰을 기록한다', async ($, on) => {
@@ -100,8 +107,6 @@ test('지난 턴을 열면 그 시간대의 내 커밋에서 변경을 복원하
   await $.command.run({ command: 'explain', args: 'list' })
   await flush()
   const ui = await $.ui.mount(pane())
-  await ui.press({ key: 'ses-s1' })
-  await flush()
   await ui.press({ key: 'past-u1' })
   await flush()
 
