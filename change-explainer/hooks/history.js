@@ -14,7 +14,18 @@ export function promptText(o) {
   if (typeof c === 'string') t = c
   else if (Array.isArray(c) && !c.some((b) => b && b.type === 'tool_result')) t = c.filter((b) => b && b.type === 'text' && b.text).map((b) => b.text).join('\n')
   t = t.trim()
-  return t && !t.startsWith('<') ? t : null
+  if (!t || t.startsWith('<') || t.startsWith('[Request interrupted')) return null
+  // 붙인 이미지 표시([Image #1], [Image: source: …])는 요청의 내용이 아니다
+  const clean = t.replace(/\[Image(?: #\d+|: source: [^\]]*)\]/g, ' ').replace(/[ \t]+/g, ' ').trim()
+  return clean || '(이미지)'
+}
+
+// 시각(ms) → 이 컴퓨터 시간대의 "MM-DD HH:mm"
+export function localDay(ms) {
+  if (!ms) return ''
+  const d = new Date(ms)
+  const p = (n) => String(n).padStart(2, '0')
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes())
 }
 
 // Claude 자체 데이터와 임시 작업 폴더는 작업 결과가 아니다
@@ -149,6 +160,20 @@ function turnExcerpt(t, maxChars = 12000) {
   let out = parts.join('\n\n')
   if (out.length > maxChars) out = out.slice(0, 2000) + '\n\n…(중간 생략)…\n\n' + out.slice(out.length - (maxChars - 2100))
   return out
+}
+
+// 그 턴이 이 커밋을 만들었나. 같은 시간대에 다른 세션도 커밋할 수 있어서 시간만으로는 모른다:
+// - 그 턴에 커밋을 만드는 명령(git commit, cherry-pick, merge, revert, am)이 있어야 하고
+// - git commit에 메시지를 적어 넣었다면(-m, heredoc) 그 메시지가 커밋 제목과 맞아야 한다
+const COMMIT_CMD = /\bgit(?:\s+-[Cc]\s+\S+)*\s+(?:commit|cherry-pick|merge|revert|am)(?![\w-])/
+export function madeByTurn(subject, bashCommands) {
+  const makers = bashCommands.filter((c) => COMMIT_CMD.test(c))
+  if (!makers.length) return false
+  const norm = (x) => x.replace(/\s+/g, ' ')
+  const head = norm(subject).slice(0, 30)
+  const inline = makers.filter((c) => /\bcommit\b[\s\S]*(\s-[a-zA-Z]*m\b|\s--message\b|<<)/.test(c))
+  if (inline.length === makers.length) return inline.some((c) => norm(c).includes(head))
+  return true
 }
 
 // `git log --format=%H%x09%cI%x09%s` → [{ sha, at, subject }]

@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { applyEdit, isWorkPath, parseLog, promptText, turnsFromTranscript } from '../hooks/history.js'
+import { applyEdit, isWorkPath, madeByTurn, parseLog, promptText, turnsFromTranscript } from '../hooks/history.js'
 
 const J = (o: any) => JSON.stringify(o)
 const user = (uuid: string, at: string, text: string) => J({ type: 'user', uuid, timestamp: at, message: { content: text } })
@@ -60,6 +60,19 @@ test('서브에이전트의 편집은 시각이 들어가는 메인 턴에 붙�
   expect(Object.keys(turns[1].files)).toEqual([])
 })
 
+test('커밋은 그것을 만든 턴에만 붙는다 (같은 시간대의 다른 세션 커밋은 제외)', () => {
+  // 커밋 명령이 없는 턴
+  expect(madeByTurn('fix(A-1): 고침', ['git log --oneline', 'git status'])).toBe(false)
+  expect(madeByTurn('fix(A-1): 고침', ['base=$(git -C /w/api merge-base HEAD origin/main)', 'git log --no-merges'])).toBe(false)
+  // 메시지를 적어 넣은 커밋: 제목이 맞아야
+  expect(madeByTurn('fix(A-1): 고침', ["cd /w/api && git commit -qam 'fix(A-1): 고침'"])).toBe(true)
+  expect(madeByTurn('fix(B-2): 다른 세션', ["cd /w/api && git commit -qam 'fix(A-1): 고침'"])).toBe(false)
+  expect(madeByTurn('fix(A-1): 고침', ["git commit -F - <<'EOF'\nfix(A-1): 고침\n\n본문\nEOF"])).toBe(true)
+  // 메시지를 알 수 없는 커밋(cherry-pick, 파일 메시지)은 시간으로 믿는다
+  expect(madeByTurn('fix(A-1): 고침', ['git -C /w/api cherry-pick abc123'])).toBe(true)
+  expect(madeByTurn('fix(A-1): 고침', ['git commit -F msg.txt'])).toBe(true)
+})
+
 test('git log 해석', () => {
   expect(parseLog('abc\t2026-10-02T10:00:00+09:00\tfix(SHOP-1): 고침\n')).toEqual([{ sha: 'abc', at: '2026-10-02T10:00:00+09:00', subject: 'fix(SHOP-1): 고침' }])
 })
@@ -68,6 +81,9 @@ test('이미지를 붙인 요청도 턴으로 인식하고, 작업 결과가 아
   expect(promptText({ type: 'user', message: { content: [{ type: 'image' }, { type: 'text', text: '이거 봐줘' }] } })).toBe('이거 봐줘')
   expect(promptText({ type: 'user', message: { content: [{ type: 'tool_result', content: 'x' }] } })).toBeNull()
   expect(promptText({ type: 'user', message: { content: '<system-reminder>x' } })).toBeNull()
+  expect(promptText({ type: 'user', message: { content: '[Request interrupted by user]' } })).toBeNull()
+  expect(promptText({ type: 'user', message: { content: '[Image #1] [Image #2] 이거 행사 찾아줘' } })).toBe('이거 행사 찾아줘')
+  expect(promptText({ type: 'user', message: { content: '[Image: source: /var/folders/x/T/p.png]' } })).toBe('(이미지)')
   expect(isWorkPath('/Users/u/p/api/src/A.java', '/Users/u')).toBe(true)
   expect(isWorkPath('/Users/u/.claude/projects/x/memory/a.md', '/Users/u')).toBe(false)
   expect(isWorkPath('/private/tmp/claude-501/x/scratch.md', '/Users/u')).toBe(false)

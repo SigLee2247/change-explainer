@@ -4,13 +4,11 @@
 //   status, progress, error,
 //   turns: [{ seq, turnId, title, files, added, removed, understood }],          이 세션 (실시간 기록)
 //   sessions: [{ id, title, at, status: 'idle' | 'loading' | 'open', turns }],   지난 세션
-//     turns: [{ seq, id, request, files, commits, understood }]  (실제로 바뀐 것이 있는 턴만)
+//     turns: [{ seq, id, request, files, commits, subjects, fileNames, understood }]  (실제로 바뀐 것이 있는 턴만)
 //   usage: { calls, input, output, cacheRead, cacheWrite }                        이 저장소에서 해설에 쓴 토큰
 // }
 
 import { C, btn, buttonRow, link, rich, rule } from './common.js'
-
-const day = (iso) => (iso ? iso.slice(5, 16).replace('T', ' ') : '')
 
 // 1234 → 1.2k
 export const k = (n) => (n >= 10000 ? Math.round(n / 1000) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n))
@@ -48,7 +46,7 @@ export function listView(el, cols, st, on) {
   if (!st.sessions.length && st.status !== 'loading') out.push(el.Text({ color: C.faint, children: ['  이 프로젝트의 지난 대화 기록이 없습니다.'] }))
   for (const ses of st.sessions) {
     const isOpen = ses.status === 'open'
-    out.push(link(el, { key: 'ses-' + ses.id, label: (isOpen ? '▾ ' : '▸ ') + day(ses.at) + '  ' + ses.title, onPress: () => on.toggleSession(ses) }))
+    out.push(link(el, { key: 'ses-' + ses.id, label: (isOpen ? '▾ ' : '▸ ') + ses.at + '  ' + ses.title, onPress: () => on.toggleSession(ses) }))
     if (ses.status === 'loading') out.push(el.Text({ color: C.dim, children: ['    대화 기록에서 턴을 복원하는 중…'] }))
     if (!isOpen) continue
     if (!ses.turns.length) {
@@ -61,14 +59,11 @@ export function listView(el, cols, st, on) {
         paddingLeft: 4,
         children: [
           link(el, { key: 'past-' + t.id, label: '#' + t.seq + '  ' + t.request.split('\n')[0].slice(0, 70), onPress: () => on.openPast(ses, t) }),
-          rich(el, [
-            '    ',
-            t.files ? ['Edit/Write 파일 ' + t.files, C.dim] : '',
-            t.files && t.commits ? ['  ·  ', C.dim] : '',
-            t.commits ? ['커밋 ' + t.commits + '개', C.dim] : '',
-            ['  ·  ', C.dim],
-            mark(t.understood),
-          ], { wrap: 'truncate-end' }),
+          // 짧은 요청("가자")만으로는 무슨 턴인지 모른다: 커밋 메시지와 바꾼 파일을 함께
+          ...t.subjects.slice(0, 3).map((subject) => rich(el, ['    ', ['커밋  ', C.faint], [subject, C.fg]], { wrap: 'truncate-end' })),
+          ...(t.subjects.length > 3 ? [rich(el, ['    ', ['커밋  외 ' + (t.subjects.length - 3) + '개', C.faint]])] : []),
+          ...(t.fileNames.length ? [rich(el, ['    ', ['파일  ', C.faint], [t.fileNames.slice(0, 4).join(', ') + (t.fileNames.length > 4 ? ' 외 ' + (t.fileNames.length - 4) + '개' : ''), C.dim]], { wrap: 'truncate-end' })] : []),
+          rich(el, ['    ', mark(t.understood)], { wrap: 'truncate-end' }),
         ],
       }))
     }

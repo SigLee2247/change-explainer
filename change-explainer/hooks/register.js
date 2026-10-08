@@ -17,7 +17,7 @@
 // 지난 세션의 턴도 같은 위치·형식으로 남는다 (대화 기록과 git에서 복원)
 
 import { commandDirs, parseNameStatus, parseStatus, projectDirName } from './git.js'
-import { isWorkPath, parseLog, promptText, turnsFromTranscript } from './history.js'
+import { isWorkPath, localDay, madeByTurn, parseLog, promptText, turnsFromTranscript } from './history.js'
 import { buildRows } from './diff.js'
 import { SECTIONS, setLanguage, answerPrompt, easyPrompt, parseAt, retryPrompt, sectionPrompt, turnContext, validate } from './generate.js'
 import { applyTheme } from './views/common.js'
@@ -559,10 +559,21 @@ async function transcriptsDir($) {
 }
 
 
-const day = (iso) => (iso ? iso.slice(5, 16).replace('T', ' ') : '')
 const MAX_SESSIONS = 30
+const SCAN_SESSIONS = 120
 
-// 지난 세션 목록: 대화 기록 파일들 (최근 것부터). 첫 요청만 가볍게 읽는다
+// 세션 파일마다: 바꾼 흔적이 있으면 @@CHANGED (Claude 메모리·임시 폴더가 아닌 곳의 Edit/Write, 또는 git commit. 서브에이전트 기록 포함),
+// 그리고 앞쪽 사용자 줄 몇 개 (제목용)
+const SCAN_SCRIPT = [
+  'for f in "$@"; do',
+  '  echo "@@F $f"',
+  '  sub="${f%.jsonl}/subagents"',
+  '  if { cat "$f"; [ -d "$sub" ] && cat "$sub"/*.jsonl; } 2>/dev/null | grep -E \'"name":"(Edit|Write|MultiEdit)"|"command":"[^"]*git [^"]*commit\' | grep -v -E \'"file_path":"[^"]*(/[.]claude/|/tmp/claude-)\' | grep -q .; then echo "@@CHANGED"; fi',
+  '  grep -m 12 -E \'"type":"user"\' "$f" | grep -v \'"tool_result"\'',
+  'done',
+].join('\n')
+
+// 지난 세션 목록: 최근에 쓴 것부터, 무언가 바꾼 세션만. 제목은 첫 요청, 시각은 마지막으로 쓴 때
 async function listSessions($) {
   const c = await ensureCtx($)
   const dir = await transcriptsDir($)
@@ -571,24 +582,26 @@ async function listSessions($) {
   const files = entries
     .filter((x) => x.kind === 'file' && x.name.endsWith('.jsonl') && x.name.slice(0, -6) !== c.sessionId)
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
-    .slice(0, MAX_SESSIONS)
-  const out = []
-  for (const f of files) {
-    // 첫 사용자 요청: 앞쪽 사용자 줄 몇 개 중 실제 요청인 첫 줄 (이미지를 붙인 요청도)
-    const head = (await sh($, 'grep -m 12 -E "\\"type\\":\\"user\\"" "$1" | grep -v "\\"tool_result\\""', [dir + '/' + f.name])).split('\n')
-    let title = ''
-    let at = ''
-    for (const line of head) {
+    .slice(0, SCAN_SESSIONS)
+  const scan = {}
+  let cur = null
+  for (const line of (await sh($, SCAN_SCRIPT, files.map((f) => dir + '/' + f.name))).split('\n')) {
+    if (line.startsWith('@@F ')) scan[(cur = line.slice(4).split('/').pop())] = { changed: false, title: '' }
+    else if (!cur) continue
+    else if (line === '@@CHANGED') scan[cur].changed = true
+    else if (!scan[cur].title) {
       let o = null
       try { o = JSON.parse(line) } catch {}
       const text = promptText(o)
-      if (text) {
-        title = text.split('\n')[0].slice(0, 60)
-        at = o.timestamp || ''
-        break
-      }
+      if (text) scan[cur].title = text.split('\n')[0].slice(0, 60)
     }
-    out.push({ id: f.name.slice(0, -6), title: title || '(요청 없음)', at, size: f.size, turns: null, status: 'idle' })
+  }
+  const out = []
+  for (const f of files) {
+    const s = scan[f.name]
+    if (!s || !s.changed || !s.title) continue
+    out.push({ id: f.name.slice(0, -6), title: s.title, at: localDay(f.mtimeMs), size: f.size, turns: null, status: 'idle' })
+    if (out.length >= MAX_SESSIONS) break
   }
   return out
 }
@@ -613,7 +626,7 @@ async function turnCommits($, top, t) {
   const email = (await git($, top, ['config', 'user.email'])).out.trim()
   const args = ['log', '--all', '--no-merges', '--reverse', '--since=' + t.startAt, '--until=' + t.endAt, '--format=%H%x09%cI%x09%s']
   if (email) args.push('--author=' + email)
-  return parseLog((await git($, top, args)).out)
+  return parseLog((await git($, top, args)).out).filter((cm) => madeByTurn(cm.subject, t.bashCommands))
 }
 
 // 세션 하나의 턴들을 대화 기록에서 복원한다 (펼칠 때). 서브에이전트 기록도 함께
@@ -638,10 +651,12 @@ async function loadSessionTurns($, sessionId) {
     // Claude 메모리나 임시 작업 폴더를 고친 것은 작업 결과가 아니다
     for (const path of Object.keys(t.files)) if (!isWorkPath(path, home)) delete t.files[path]
     // 실제로 바뀐 것이 있는 턴만: Edit/Write 변경, 또는 그 시간대의 커밋
-    let commits = 0
-    if (t.bashCommands.length) for (const top of await turnRepos($, t)) commits += (await turnCommits($, top, t)).length
+    const subjects = []
+    if (t.bashCommands.length) for (const top of await turnRepos($, t)) for (const cm of await turnCommits($, top, t)) subjects.push(cm.subject)
     const files = Object.keys(t.files).length
-    if (files || commits) out.push({ ...t, seq: i + 1, files, commits })
+    // "가자"처럼 짧은 요청만으로는 무슨 턴인지 모른다: 커밋 메시지와 바꾼 파일 이름을 함께 보여 준다
+    const fileNames = Object.keys(t.files).map((x) => x.split('/').pop())
+    if (files || subjects.length) out.push({ ...t, seq: i + 1, files, commits: subjects.length, subjects, fileNames })
   }
   return out
 }
@@ -897,8 +912,12 @@ export function register(on, opts) {
         for (const ses of list.sessions) {
           const turns = await loadSessionTurns($, ses.id)
           if (!turns.length) continue
-          lines.push('', day(ses.at) + '  ' + ses.title + '  [' + ses.id.slice(0, 8) + ']')
-          for (const t of turns) lines.push('  #' + t.seq + '  ' + t.request.split('\n')[0].slice(0, 60) + '  (Edit/Write 파일 ' + t.files + ', 커밋 ' + t.commits + ')')
+          lines.push('', ses.at + '  ' + ses.title + '  [' + ses.id.slice(0, 8) + ']')
+          for (const t of turns) {
+            lines.push('  #' + t.seq + '  ' + t.request.split('\n')[0].slice(0, 60))
+            for (const subject of t.subjects) lines.push('      커밋: ' + subject)
+            if (t.fileNames.length) lines.push('      파일: ' + t.fileNames.join(', '))
+          }
         }
         const u = list.usage
         lines.push('', '해설에 쓴 토큰 (이 저장소 누적): 호출 ' + u.calls + '회, 입력 ' + u.input + ' (캐시 읽기 ' + u.cacheRead + ', 캐시 쓰기 ' + u.cacheWrite + '), 출력 ' + u.output)

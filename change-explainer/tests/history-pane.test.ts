@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { localDay } from '../hooks/history.js'
 
 // 지난 세션 s1: 첫 턴에서 Bash로 /w/api를 고치고 커밋, 둘째 턴은 질문만
 const J = (o: any) => JSON.stringify(o)
@@ -13,7 +14,8 @@ const TRANSCRIPT = [
 function run(argv: string[]): { exitCode: number; stdout: string } {
   if (argv[0] === 'sh') {
     const script = argv[2]
-    if (script.includes('grep -m 1')) return { exitCode: 0, stdout: TRANSCRIPT.split('\n')[0] + '\n' }
+    // 세션 훑기: s1은 바꾼 흔적이 있고, quiet는 대화만 했다
+    if (script.includes('@@CHANGED')) return { exitCode: 0, stdout: argv.slice(4).map((f) => '@@F ' + f + '\n' + (f.endsWith('/s1.jsonl') ? '@@CHANGED\n' + TRANSCRIPT.split('\n')[0] : J({ type: 'user', message: { content: '이건 뭐야?' } }))).join('\n') + '\n' }
     if (script.includes('originalFile') && script.includes('tool_result')) return { exitCode: 0, stdout: TRANSCRIPT + '\n' }
     return { exitCode: 0, stdout: '' }
   }
@@ -33,6 +35,8 @@ function run(argv: string[]): { exitCode: number; stdout: string } {
   return { exitCode: 0, stdout: '' }
 }
 
+const S1_MTIME = Date.parse('2026-10-02T02:00:30Z')
+
 const SUMMARY = { tldr: '상한을 100에서 200으로 올렸습니다.', files: [], why: ['요청대로'], how: [], review: [], hunkNotes: ['상한 200'] }
 
 function setup(on: any) {
@@ -45,7 +49,11 @@ function setup(on: any) {
   on('session.surfaces', () => ({ value: ['terminal'] }))
   on('session.model', () => ({ value: 'claude-sonnet' }))
   on('process.run', ($: any, e: any) => ({ value: { ...run(e.argv), stderr: '' } }))
-  on('fs.list', () => ({ value: [{ name: 's1.jsonl', kind: 'file', size: 100, mtimeMs: 2, isLink: false }, { name: 'now.jsonl', kind: 'file', size: 1, mtimeMs: 3, isLink: false }] }))
+  on('fs.list', () => ({ value: [
+    { name: 's1.jsonl', kind: 'file', size: 100, mtimeMs: S1_MTIME, isLink: false },
+    { name: 'quiet.jsonl', kind: 'file', size: 50, mtimeMs: S1_MTIME + 1, isLink: false },
+    { name: 'now.jsonl', kind: 'file', size: 1, mtimeMs: S1_MTIME + 2, isLink: false },
+  ] }))
   on('fs.exists', ($: any, e: any) => ({ value: e.path.startsWith('/w/') }))
   on('fs.stat', () => ({ deny: 'ENOENT' }))
   on('fs.read', ($: any, e: any) => (writes.has(e.path) ? { value: writes.get(e.path) } : { deny: 'ENOENT' }))
@@ -72,18 +80,19 @@ const pane = () => ({
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
 
-test('지난 세션을 펼치면 파일을 바꾼 턴만 보이고, 지금 세션은 지난 세션 목록에 없다', async ($, on) => {
+test('지난 세션은 바꾼 것이 있는 세션만 마지막으로 쓴 시각과 함께 보이고, 펼치면 바꾼 턴을 커밋 메시지와 함께 보여 준다', async ($, on) => {
   setup(on)
   await $.command.run({ command: 'explain', args: 'list' })
   await flush()
   const ui = await $.ui.mount(pane())
-  expect(await ui.find({ key: 'ses-s1' })).toMatchObject({ props: { label: '▸ 10-02 01:00  SHOP-1 상한을 200으로 고쳐줘' } })
+  expect(await ui.find({ key: 'ses-s1' })).toMatchObject({ props: { label: '▸ ' + localDay(S1_MTIME) + '  SHOP-1 상한을 200으로 고쳐줘' } })
   expect(await ui.find({ key: 'ses-now' })).toBeUndefined()
+  expect(await ui.find({ key: 'ses-quiet' })).toBeUndefined()
   await ui.press({ key: 'ses-s1' })
   await flush()
   expect(await ui.find({ key: 'past-u1' })).toMatchObject({ props: { label: '#1  SHOP-1 상한을 200으로 고쳐줘' } })
   expect(await ui.find({ key: 'past-u2' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /커밋 1개/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /커밋  fix\(SHOP-1\): 상한 200/ })).toBeDefined()
 })
 
 test('지난 턴을 열면 그 시간대의 내 커밋에서 변경을 복원하고, 그 턴의 대화로 해설하며 토큰을 기록한다', async ($, on) => {
